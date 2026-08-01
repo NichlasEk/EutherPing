@@ -509,7 +509,7 @@ private fun DeckHeader(onSearch: () -> Unit) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.3.0",
+                "ACOUSTIC MESSAGE TERMINAL 0.3.1",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -1347,7 +1347,7 @@ private fun SecurePairingCard(
             )
             Text(
                 when (peerState) {
-                    SecurePeerState.NONE -> "Send a signed EutherPing key invitation as an ordinary multipart SMS."
+                    SecurePeerState.NONE -> "Send an EutherPing key invitation as one ordinary SMS."
                     SecurePeerState.INVITE_SENT -> "The other phone must open this thread and accept the invitation."
                     SecurePeerState.INVITE_RECEIVED -> "Accept to return this phone's public keys and enable encrypted SMS capsules."
                     SecurePeerState.ACTIVE_UNVERIFIED -> "Compare this safety code on both phones before marking the identity verified."
@@ -1383,7 +1383,7 @@ private fun SecurePairingCard(
                     modifier = Modifier.padding(top = 11.dp),
                 ) { Text("SEND SECURE INVITE", fontWeight = FontWeight.Black) }
                 SecurePeerState.INVITE_SENT -> TextButton(onClick = onInvite) {
-                    Text("RESEND INVITE", color = Violet)
+                    Text("RESEND ONE-SMS INVITE", color = Violet)
                 }
                 SecurePeerState.INVITE_RECEIVED -> Button(
                     onClick = onAccept,

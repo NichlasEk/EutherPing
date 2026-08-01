@@ -1,6 +1,7 @@
 package se.apothictech.eutherping.secure
 
 import android.content.Context
+import android.telephony.PhoneNumberUtils
 import android.util.Base64
 import com.google.crypto.tink.Aead
 import com.google.crypto.tink.BinaryKeysetReader
@@ -16,10 +17,17 @@ import com.google.crypto.tink.aead.AeadKeyTemplates
 import com.google.crypto.tink.hybrid.HpkeParameters
 import com.google.crypto.tink.hybrid.HybridConfig
 import com.google.crypto.tink.integration.android.AndroidKeysetManager
+import com.google.crypto.tink.proto.KeyData
+import com.google.crypto.tink.proto.KeyStatusType
+import com.google.crypto.tink.proto.Keyset
+import com.google.crypto.tink.proto.OutputPrefixType
+import com.google.crypto.tink.shaded.protobuf.ByteString
 import com.google.crypto.tink.signature.SignatureConfig
 import com.google.crypto.tink.signature.SignatureKeyTemplates
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
 import java.util.UUID
@@ -39,10 +47,12 @@ data class SecurePeer(
     val fingerprint: String?,
     val state: SecurePeerState,
 ) {
-    val canEncrypt: Boolean
+    val hasKeys: Boolean
         get() = encryptionPublicKey != null &&
-            signingPublicKey != null &&
-            state in setOf(SecurePeerState.ACTIVE_UNVERIFIED, SecurePeerState.VERIFIED)
+            signingPublicKey != null
+
+    val canEncrypt: Boolean
+        get() = hasKeys && state == SecurePeerState.VERIFIED
 }
 
 data class SecureDecodedMessage(
@@ -52,9 +62,14 @@ data class SecureDecodedMessage(
 )
 
 object SecureRepository {
-    const val INVITE_PREFIX = "EP1I:"
-    const val ACCEPT_PREFIX = "EP1A:"
+    const val INVITE_PREFIX = "EP2I:"
+    const val ACCEPT_PREFIX = "EP2A:"
     const val MESSAGE_PREFIX = "EP1M:"
+
+    private const val LEGACY_INVITE_PREFIX = "EP1I:"
+    private const val LEGACY_ACCEPT_PREFIX = "EP1A:"
+    private const val HPKE_PUBLIC_TYPE_URL = "type.googleapis.com/google.crypto.tink.HpkePublicKey"
+    private const val ED25519_PUBLIC_TYPE_URL = "type.googleapis.com/google.crypto.tink.Ed25519PublicKey"
 
     private const val KEYSET_PREFS = "eutherping_secure_keysets"
     private const val PEER_PREFS = "eutherping_secure_peers"
@@ -77,8 +92,19 @@ object SecureRepository {
 
     fun peer(context: Context, address: String): SecurePeer {
         val normalized = normalizeAddress(address)
-        val raw = context.getSharedPreferences(PEER_PREFS, Context.MODE_PRIVATE)
-            .getString(peerKey(normalized), null)
+        val preferences = context.getSharedPreferences(PEER_PREFS, Context.MODE_PRIVATE)
+        val raw = preferences.getString(peerKey(normalized), null)
+            ?: preferences.all.values.asSequence()
+                .filterIsInstance<String>()
+                .firstOrNull { candidate ->
+                    runCatching {
+                        addressesEquivalent(
+                            context,
+                            normalized,
+                            JSONObject(candidate).optString("address"),
+                        )
+                    }.getOrDefault(false)
+                }
             ?: return SecurePeer(normalized, null, null, null, SecurePeerState.NONE)
         return runCatching {
             val json = JSONObject(raw)
@@ -115,23 +141,27 @@ object SecureRepository {
 
     fun markVerified(context: Context, address: String) {
         val current = peer(context, address)
-        if (current.canEncrypt) savePeer(context, current.copy(state = SecurePeerState.VERIFIED))
+        if (current.hasKeys && current.state == SecurePeerState.ACTIVE_UNVERIFIED) {
+            savePeer(context, current.copy(state = SecurePeerState.VERIFIED))
+        }
     }
 
     fun handleIncomingControl(context: Context, address: String, body: String): Boolean {
-        val prefix = when {
-            body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX
-            body.startsWith(ACCEPT_PREFIX) -> ACCEPT_PREFIX
+        val (prefix, isAcceptance) = when {
+            body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX to false
+            body.startsWith(ACCEPT_PREFIX) -> ACCEPT_PREFIX to true
+            body.startsWith(LEGACY_INVITE_PREFIX) -> LEGACY_INVITE_PREFIX to false
+            body.startsWith(LEGACY_ACCEPT_PREFIX) -> LEGACY_ACCEPT_PREFIX to true
             else -> return false
         }
-        val bundle = runCatching { decodeAndVerifyBundle(body.removePrefix(prefix)) }.getOrNull()
+        val bundle = runCatching { decodeBundle(body, prefix) }.getOrNull()
             ?: return false
         val current = peer(context, address)
         val sameVerifiedIdentity = current.state == SecurePeerState.VERIFIED &&
             current.fingerprint == bundle.fingerprint
         val nextState = when {
             sameVerifiedIdentity -> SecurePeerState.VERIFIED
-            prefix == ACCEPT_PREFIX -> SecurePeerState.ACTIVE_UNVERIFIED
+            isAcceptance -> SecurePeerState.ACTIVE_UNVERIFIED
             else -> SecurePeerState.INVITE_RECEIVED
         }
         savePeer(
@@ -190,14 +220,14 @@ object SecureRepository {
         body: String,
         incoming: Boolean,
     ): SecureDecodedMessage? = when {
-        body.startsWith(INVITE_PREFIX) -> decodeBundleForDisplay(
+        body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_INVITE_PREFIX) -> decodeBundleForDisplay(
             body = body,
-            prefix = INVITE_PREFIX,
+            prefix = if (body.startsWith(INVITE_PREFIX)) INVITE_PREFIX else LEGACY_INVITE_PREFIX,
             validText = if (incoming) "Secure Ping invitation received" else "Secure Ping invitation sent",
         )
-        body.startsWith(ACCEPT_PREFIX) -> decodeBundleForDisplay(
+        body.startsWith(ACCEPT_PREFIX) || body.startsWith(LEGACY_ACCEPT_PREFIX) -> decodeBundleForDisplay(
             body = body,
-            prefix = ACCEPT_PREFIX,
+            prefix = if (body.startsWith(ACCEPT_PREFIX)) ACCEPT_PREFIX else LEGACY_ACCEPT_PREFIX,
             validText = "Secure Ping channel accepted",
             verified = peer(context, address).state == SecurePeerState.VERIFIED,
         )
@@ -225,12 +255,22 @@ object SecureRepository {
     }
 
     fun notificationText(context: Context, address: String, body: String): String = when {
-        body.startsWith(INVITE_PREFIX) -> if (isValidBundle(body, INVITE_PREFIX)) {
+        body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_INVITE_PREFIX) -> if (
+            isValidBundle(
+                body,
+                if (body.startsWith(INVITE_PREFIX)) INVITE_PREFIX else LEGACY_INVITE_PREFIX,
+            )
+        ) {
             "Secure Ping invitation received"
         } else {
             "Invalid Secure Ping invitation received"
         }
-        body.startsWith(ACCEPT_PREFIX) -> if (isValidBundle(body, ACCEPT_PREFIX)) {
+        body.startsWith(ACCEPT_PREFIX) || body.startsWith(LEGACY_ACCEPT_PREFIX) -> if (
+            isValidBundle(
+                body,
+                if (body.startsWith(ACCEPT_PREFIX)) ACCEPT_PREFIX else LEGACY_ACCEPT_PREFIX,
+            )
+        ) {
             "Secure Ping channel accepted"
         } else {
             "Invalid Secure Ping response received"
@@ -301,7 +341,7 @@ object SecureRepository {
     }
 
     private fun isValidBundle(body: String, prefix: String): Boolean =
-        runCatching { decodeAndVerifyBundle(body.removePrefix(prefix)) }.isSuccess
+        runCatching { decodeBundle(body, prefix) }.isSuccess
 
     private fun invalidSecureCapsule(): SecureDecodedMessage = SecureDecodedMessage(
         text = "⚠ Invalid or unauthenticated Secure Ping capsule",
@@ -313,7 +353,6 @@ object SecureRepository {
         val encryptionPublicKey: ByteArray,
         val signingPublicKey: ByteArray,
         val fingerprint: String,
-        val signer: PublicKeySign? = null,
     )
 
     private fun identity(context: Context): IdentityBundle {
@@ -325,27 +364,49 @@ object SecureRepository {
             encryptionPublicKey = encryptionPublicKey,
             signingPublicKey = signingPublicKey,
             fingerprint = fingerprint(encryptionPublicKey, signingPublicKey),
-            signer = signingHandle.getPrimitive(PublicKeySign::class.java),
         )
     }
 
     private fun encodeBundle(prefix: String, bundle: IdentityBundle): String {
-        val encryption = encode(bundle.encryptionPublicKey)
-        val signing = encode(bundle.signingPublicKey)
-        val unsigned = bundleCanonical(encryption, signing, bundle.fingerprint)
-        val signature = checkNotNull(bundle.signer).sign(unsigned)
-        return prefix + JSONObject()
-            .put("v", 1)
-            .put("e", encryption)
-            .put("s", signing)
-            .put("f", bundle.fingerprint)
-            .put("x", encode(signature))
-            .toString()
-            .toByteArray(UTF_8)
-            .let(::encode)
+        require(prefix == INVITE_PREFIX || prefix == ACCEPT_PREFIX)
+        val encryption = compactPublicKey(bundle.encryptionPublicKey, HPKE_PUBLIC_TYPE_URL)
+        val signing = compactPublicKey(bundle.signingPublicKey, ED25519_PUBLIC_TYPE_URL)
+        val wire = ByteBuffer.allocate(
+            1 + Int.SIZE_BYTES + Short.SIZE_BYTES + encryption.value.size +
+                Int.SIZE_BYTES + Short.SIZE_BYTES + signing.value.size,
+        ).order(ByteOrder.BIG_ENDIAN)
+            .put(2)
+            .putInt(encryption.keyId)
+            .putShort(encryption.value.size.toShort())
+            .put(encryption.value)
+            .putInt(signing.keyId)
+            .putShort(signing.value.size.toShort())
+            .put(signing.value)
+            .array()
+        return prefix + encode(wire)
     }
 
-    private fun decodeAndVerifyBundle(encoded: String): IdentityBundle {
+    private fun decodeBundle(body: String, prefix: String): IdentityBundle = when (prefix) {
+        INVITE_PREFIX, ACCEPT_PREFIX -> decodeCompactBundle(body.removePrefix(prefix))
+        LEGACY_INVITE_PREFIX, LEGACY_ACCEPT_PREFIX -> decodeAndVerifyLegacyBundle(body.removePrefix(prefix))
+        else -> error("Unsupported Secure Ping key bundle")
+    }
+
+    private fun decodeCompactBundle(encoded: String): IdentityBundle {
+        registerCrypto()
+        val buffer = ByteBuffer.wrap(decode(encoded)).order(ByteOrder.BIG_ENDIAN)
+        require(buffer.get().toInt() == 2) { "Unsupported compact key bundle" }
+        val encryption = readCompactPublicKey(buffer, HPKE_PUBLIC_TYPE_URL)
+        val signing = readCompactPublicKey(buffer, ED25519_PUBLIC_TYPE_URL)
+        require(!buffer.hasRemaining()) { "Unexpected compact key data" }
+        KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(encryption))
+            .getPrimitive(HybridEncrypt::class.java)
+        KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(signing))
+            .getPrimitive(PublicKeyVerify::class.java)
+        return IdentityBundle(encryption, signing, fingerprint(encryption, signing))
+    }
+
+    private fun decodeAndVerifyLegacyBundle(encoded: String): IdentityBundle {
         registerCrypto()
         val json = JSONObject(String(decode(encoded), UTF_8))
         require(json.getInt("v") == 1)
@@ -365,6 +426,44 @@ object SecureRepository {
 
     private fun bundleCanonical(encryption: String, signing: String, fingerprint: String): ByteArray =
         "1|$encryption|$signing|$fingerprint".toByteArray(UTF_8)
+
+    private data class CompactPublicKey(val keyId: Int, val value: ByteArray)
+
+    private fun compactPublicKey(serialized: ByteArray, expectedTypeUrl: String): CompactPublicKey {
+        val keyset = Keyset.parseFrom(serialized)
+        require(keyset.keyCount == 1) { "Secure Ping requires one public key" }
+        val key = keyset.getKey(0)
+        require(key.keyId == keyset.primaryKeyId)
+        require(key.status == KeyStatusType.ENABLED)
+        require(key.outputPrefixType == OutputPrefixType.TINK)
+        require(key.keyData.typeUrl == expectedTypeUrl)
+        return CompactPublicKey(key.keyId, key.keyData.value.toByteArray())
+    }
+
+    private fun readCompactPublicKey(buffer: ByteBuffer, typeUrl: String): ByteArray {
+        require(buffer.remaining() >= Int.SIZE_BYTES + Short.SIZE_BYTES)
+        val keyId = buffer.int
+        val size = buffer.short.toInt() and 0xffff
+        require(size in 1..512 && buffer.remaining() >= size)
+        val value = ByteArray(size)
+        buffer.get(value)
+        val keyData = KeyData.newBuilder()
+            .setTypeUrl(typeUrl)
+            .setValue(ByteString.copyFrom(value))
+            .setKeyMaterialType(KeyData.KeyMaterialType.ASYMMETRIC_PUBLIC)
+            .build()
+        val key = Keyset.Key.newBuilder()
+            .setKeyData(keyData)
+            .setStatus(KeyStatusType.ENABLED)
+            .setKeyId(keyId)
+            .setOutputPrefixType(OutputPrefixType.TINK)
+            .build()
+        return Keyset.newBuilder()
+            .setPrimaryKeyId(keyId)
+            .addKey(key)
+            .build()
+            .toByteArray()
+    }
 
     private fun hpkeKeyset(context: Context): KeysetHandle {
         registerCrypto()
@@ -472,6 +571,15 @@ object SecureRepository {
 
     private fun peerKey(address: String): String =
         sha256(normalizeAddress(address).toByteArray(UTF_8)).joinToString("") { "%02x".format(it) }
+
+    private fun addressesEquivalent(context: Context, left: String, right: String): Boolean {
+        val normalizedLeft = normalizeAddress(left)
+        val normalizedRight = normalizeAddress(right)
+        if (normalizedLeft == normalizedRight) return true
+        if (normalizedLeft.count(Char::isDigit) < 7 || normalizedRight.count(Char::isDigit) < 7) return false
+        @Suppress("DEPRECATION")
+        return PhoneNumberUtils.compare(context, normalizedLeft, normalizedRight)
+    }
 
     private fun normalizeAddress(address: String): String = address.trim().filter { it.isDigit() || it == '+' }
 
