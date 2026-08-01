@@ -14,6 +14,7 @@ import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -259,6 +260,9 @@ private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Un
             onAddressConsumed()
         }
     }
+    BackHandler(enabled = activeConversation != null) {
+        activeConversation = null
+    }
     val isLightTheme = appTheme == AppTheme.LIGHT
     val scheme = if (isLightTheme) {
         lightColorScheme(
@@ -432,6 +436,14 @@ private fun SignalDeck(
         }
     }
 
+    BackHandler(enabled = showContactSearch || selectedTab != SignalTab.SIGNALS) {
+        if (showContactSearch) {
+            showContactSearch = false
+        } else {
+            selectedTab = SignalTab.SIGNALS
+        }
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
@@ -509,7 +521,7 @@ private fun DeckHeader(onSearch: () -> Unit) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.3.1",
+                "ACOUSTIC MESSAGE TERMINAL 0.3.2",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
