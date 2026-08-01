@@ -1,10 +1,23 @@
 package se.apothictech.eutherping
 
+import android.Manifest
+import android.app.role.RoleManager
+import android.content.Intent
+import android.database.ContentObserver
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.provider.Telephony
+import android.util.Log
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.RepeatMode
@@ -46,6 +59,9 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -55,10 +71,14 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -76,6 +96,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -84,8 +105,11 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalTime
+import java.time.Instant
+import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import androidx.core.view.WindowCompat
+import se.apothictech.eutherping.sms.SmsRepository
 
 private val Void = Color(0xFF020604)
 private val Deep = Color(0xFF06100B)
@@ -117,10 +141,12 @@ private data class Conversation(
     val transport: Transport,
     val unread: Int = 0,
     val distance: String,
+    val smsAddress: String? = null,
+    val threadId: Long? = null,
 )
 
 private data class DemoMessage(
-    val id: Int,
+    val id: Long,
     val text: String,
     val outgoing: Boolean,
     val time: String,
@@ -128,8 +154,11 @@ private data class DemoMessage(
 )
 
 class MainActivity : ComponentActivity() {
+    private var requestedAddress by mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        requestedAddress = intent.smsAddress()
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
@@ -138,13 +167,66 @@ class MainActivity : ComponentActivity() {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
         }
-        setContent { EutherPingApp() }
+        setContent {
+            EutherPingApp(
+                requestedAddress = requestedAddress,
+                onAddressConsumed = { requestedAddress = null },
+            )
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        requestedAddress = intent.smsAddress()
     }
 }
 
 @Composable
-private fun EutherPingApp() {
+private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Unit) {
+    val context = LocalContext.current
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
+    var setupRevision by remember { mutableIntStateOf(0) }
+    val permissionsLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        setupRevision++
+    }
+    val roleLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) {
+        setupRevision++
+        if (SmsRepository.isDefaultSmsApp(context)) {
+            permissionsLauncher.launch(SmsRepository.requiredPermissions)
+        }
+    }
+    val isDefaultSmsApp = remember(setupRevision) { SmsRepository.isDefaultSmsApp(context) }
+    val hasSmsPermissions = remember(setupRevision) { SmsRepository.hasSmsPermissions(context) }
+    val smsRevision = rememberSmsRevision(isDefaultSmsApp && hasSmsPermissions)
+
+    fun requestSmsSetup() {
+        if (!SmsRepository.isDefaultSmsApp(context)) {
+            val request = if (Build.VERSION.SDK_INT >= 29) {
+                context.getSystemService(RoleManager::class.java)
+                    .createRequestRoleIntent(RoleManager.ROLE_SMS)
+            } else {
+                Intent(Telephony.Sms.Intents.ACTION_CHANGE_DEFAULT).apply {
+                    putExtra(Telephony.Sms.Intents.EXTRA_PACKAGE_NAME, context.packageName)
+                }
+            }
+            roleLauncher.launch(request)
+        } else {
+            permissionsLauncher.launch(SmsRepository.requiredPermissions)
+        }
+    }
+
+    LaunchedEffect(requestedAddress) {
+        val address = requestedAddress?.trim().orEmpty()
+        if (address.isNotEmpty()) {
+            activeConversation = cellConversation(address, null)
+            onAddressConsumed()
+        }
+    }
     val scheme = darkColorScheme(
         primary = Toxic,
         onPrimary = Void,
@@ -160,16 +242,45 @@ private fun EutherPingApp() {
         Surface(modifier = Modifier.fillMaxSize(), color = Void) {
             AbyssBackground {
                 if (activeConversation == null) {
-                    SignalDeck(onOpenConversation = { activeConversation = it })
+                    SignalDeck(
+                        isDefaultSmsApp = isDefaultSmsApp,
+                        hasSmsPermissions = hasSmsPermissions,
+                        smsRevision = smsRevision,
+                        onRequestSmsSetup = ::requestSmsSetup,
+                        onOpenConversation = { activeConversation = it },
+                    )
                 } else {
                     ConversationDeck(
                         conversation = activeConversation!!,
+                        smsRevision = smsRevision,
                         onBack = { activeConversation = null },
                     )
                 }
             }
         }
     }
+}
+
+@Composable
+private fun rememberSmsRevision(enabled: Boolean): Int {
+    val context = LocalContext.current
+    var revision by remember { mutableIntStateOf(0) }
+    DisposableEffect(context, enabled) {
+        if (!enabled) return@DisposableEffect onDispose { }
+        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                revision++
+            }
+        }
+        context.contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
+        onDispose { context.contentResolver.unregisterContentObserver(observer) }
+    }
+    return revision
+}
+
+private fun Intent.smsAddress(): String? {
+    if (action != Intent.ACTION_SENDTO && action != Intent.ACTION_VIEW) return null
+    return data?.schemeSpecificPart?.substringBefore('?')?.takeIf { it.isNotBlank() }
 }
 
 @Composable
@@ -197,7 +308,13 @@ private fun AbyssBackground(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SignalDeck(onOpenConversation: (Conversation) -> Unit) {
+private fun SignalDeck(
+    isDefaultSmsApp: Boolean,
+    hasSmsPermissions: Boolean,
+    smsRevision: Int,
+    onRequestSmsSetup: () -> Unit,
+    onOpenConversation: (Conversation) -> Unit,
+) {
     var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
     Scaffold(
         containerColor = Color.Transparent,
@@ -213,9 +330,19 @@ private fun SignalDeck(onOpenConversation: (Conversation) -> Unit) {
         ) {
             DeckHeader()
             when (selectedTab) {
-                SignalTab.SIGNALS -> SignalsScreen(onOpenConversation)
+                SignalTab.SIGNALS -> SignalsScreen(
+                    isDefaultSmsApp = isDefaultSmsApp,
+                    hasSmsPermissions = hasSmsPermissions,
+                    smsRevision = smsRevision,
+                    onRequestSmsSetup = onRequestSmsSetup,
+                    onOpenConversation = onOpenConversation,
+                )
                 SignalTab.CONTACTS -> VesselsScreen(onOpenConversation)
-                SignalTab.SYSTEM -> SystemScreen()
+                SignalTab.SYSTEM -> SystemScreen(
+                    isDefaultSmsApp = isDefaultSmsApp,
+                    hasSmsPermissions = hasSmsPermissions,
+                    onRequestSmsSetup = onRequestSmsSetup,
+                )
             }
         }
     }
@@ -248,7 +375,7 @@ private fun DeckHeader() {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.1",
+                "ACOUSTIC MESSAGE TERMINAL 0.2",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -265,8 +392,43 @@ private fun DeckHeader() {
 }
 
 @Composable
-private fun SignalsScreen(onOpenConversation: (Conversation) -> Unit) {
-    val conversations = remember { sampleConversations() }
+private fun SignalsScreen(
+    isDefaultSmsApp: Boolean,
+    hasSmsPermissions: Boolean,
+    smsRevision: Int,
+    onRequestSmsSetup: () -> Unit,
+    onOpenConversation: (Conversation) -> Unit,
+) {
+    val context = LocalContext.current
+    var showNewSignal by rememberSaveable { mutableStateOf(false) }
+    val realSmsReady = isDefaultSmsApp && hasSmsPermissions
+    val smsConversations = remember(realSmsReady, smsRevision) {
+        if (realSmsReady) {
+            SmsRepository.loadThreads(context).map { thread ->
+                Conversation(
+                    id = (100_000L + thread.threadId).toInt(),
+                    name = thread.address,
+                    initials = addressInitials(thread.address),
+                    preview = thread.body,
+                    time = formatMessageTime(thread.timestamp),
+                    transport = Transport.SMS,
+                    unread = thread.unread,
+                    distance = "ANDROID TELEPHONY",
+                    smsAddress = thread.address,
+                    threadId = thread.threadId,
+                )
+            }
+        } else {
+            emptyList()
+        }
+    }
+    val conversations = remember(realSmsReady, smsConversations) {
+        if (realSmsReady) {
+            smsConversations + sampleConversations().filter { it.transport == Transport.SECURE }
+        } else {
+            sampleConversations()
+        }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(
@@ -276,6 +438,18 @@ private fun SignalsScreen(onOpenConversation: (Conversation) -> Unit) {
         ),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        if (!realSmsReady) {
+            item {
+                SmsSetupBanner(
+                    isDefaultSmsApp = isDefaultSmsApp,
+                    onRequestSmsSetup = onRequestSmsSetup,
+                )
+            }
+        } else {
+            item {
+                NewCellSignalButton(onClick = { showNewSignal = true })
+            }
+        }
         item { SonarHero() }
         item {
             Row(
@@ -303,6 +477,117 @@ private fun SignalsScreen(onOpenConversation: (Conversation) -> Unit) {
             ConversationRow(conversation, onClick = { onOpenConversation(conversation) })
         }
     }
+    if (showNewSignal) {
+        NewSmsDialog(
+            onDismiss = { showNewSignal = false },
+            onOpen = { address ->
+                showNewSignal = false
+                onOpenConversation(cellConversation(address, null))
+            },
+        )
+    }
+}
+
+@Composable
+private fun SmsSetupBanner(isDefaultSmsApp: Boolean, onRequestSmsSetup: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Amber.copy(alpha = 0.1f)),
+        border = BorderStroke(1.dp, Amber.copy(alpha = 0.55f)),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(15.dp)) {
+            Text(
+                if (isDefaultSmsApp) "SMS PERMISSIONS REQUIRED" else "CONNECT ANDROID SMS ARRAY",
+                color = Amber,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.8.sp,
+            )
+            Text(
+                if (isDefaultSmsApp) {
+                    "EutherPing has the SMS role. Grant access to read, receive and send your messages."
+                } else {
+                    "Android must make EutherPing the default SMS app before sensitive SMS access can be requested."
+                },
+                color = Mist,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(top = 7.dp, bottom = 11.dp),
+            )
+            Button(
+                onClick = onRequestSmsSetup,
+                colors = ButtonDefaults.buttonColors(containerColor = Amber, contentColor = Void),
+            ) {
+                Text(
+                    if (isDefaultSmsApp) "GRANT SMS ACCESS" else "MAKE DEFAULT SMS APP",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Black,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun NewCellSignalButton(onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = Amber.copy(alpha = 0.08f)),
+        border = BorderStroke(1.dp, Amber.copy(alpha = 0.35f)),
+        shape = RoundedCornerShape(15.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 15.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Default.Add, contentDescription = null, tint = Amber)
+            Spacer(Modifier.width(9.dp))
+            Text(
+                "NEW CELL SIGNAL",
+                color = Amber,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 0.7.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
+    var address by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Deep,
+        title = {
+            Text("NEW CELL SIGNAL", color = Amber, fontFamily = FontFamily.Monospace)
+        },
+        text = {
+            OutlinedTextField(
+                value = address,
+                onValueChange = { address = it.filter { character -> character.isDigit() || character in "+*# " } },
+                label = { Text("Phone number") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Amber,
+                    focusedTextColor = Mist,
+                    unfocusedTextColor = Mist,
+                    cursorColor = Amber,
+                ),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { onOpen(address.trim()) }, enabled = address.isNotBlank()) {
+                Text("OPEN CHANNEL", color = Amber, fontFamily = FontFamily.Monospace)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("CANCEL", color = Muted, fontFamily = FontFamily.Monospace)
+            }
+        },
+    )
 }
 
 @Composable
@@ -444,32 +729,71 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ConversationDeck(conversation: Conversation, onBack: () -> Unit) {
-    val messages = remember(conversation.id) {
+private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val demoMessages = remember(conversation.id) {
         mutableStateListOf(
             DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", Transport.SECURE),
             DemoMessage(2, "Barely. The fog is rolling in.", true, "22:05", Transport.SECURE),
             DemoMessage(3, "Ping me when you reach the north pier.", false, "22:06", Transport.SECURE),
         )
     }
+    val isRealSms = conversation.smsAddress != null
+    val realMessages = remember(conversation.threadId, conversation.smsAddress, smsRevision) {
+        if (isRealSms) {
+            SmsRepository.loadMessages(
+                context = context,
+                threadId = conversation.threadId,
+                address = conversation.smsAddress.orEmpty(),
+            ).map { message ->
+                DemoMessage(
+                    id = message.id,
+                    text = message.body,
+                    outgoing = !message.incoming,
+                    time = formatMessageTime(message.timestamp),
+                    transport = Transport.SMS,
+                )
+            }
+        } else {
+            emptyList()
+        }
+    }
+    val messages = if (isRealSms) realMessages else demoMessages
     var composerTransport by rememberSaveable(conversation.id) {
-        mutableStateOf(conversation.transport)
+        mutableStateOf(if (isRealSms) Transport.SMS else conversation.transport)
     }
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
 
-    fun sendDemo() {
+    LaunchedEffect(conversation.threadId) {
+        if (isRealSms) SmsRepository.markThreadRead(context, conversation.threadId)
+    }
+
+    fun sendMessage() {
         val text = draft.trim()
         if (text.isNotEmpty()) {
-            messages += DemoMessage(
-                id = (messages.maxOfOrNull { it.id } ?: 0) + 1,
-                text = text,
-                outgoing = true,
-                time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")),
-                transport = composerTransport,
-            )
-            draft = ""
-            focusManager.clearFocus()
+            if (isRealSms) {
+                SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), text)
+                    .onSuccess {
+                        draft = ""
+                        focusManager.clearFocus()
+                        Toast.makeText(context, "SMS queued", Toast.LENGTH_SHORT).show()
+                    }
+                    .onFailure {
+                        Log.e("EutherPingSms", "SMS send failed", it)
+                        Toast.makeText(context, "SMS failed: ${it.message}", Toast.LENGTH_LONG).show()
+                    }
+            } else {
+                demoMessages += DemoMessage(
+                    id = (demoMessages.maxOfOrNull { it.id } ?: 0) + 1,
+                    text = text,
+                    outgoing = true,
+                    time = LocalTime.now().format(DateTimeFormatter.ofPattern("HH:mm")),
+                    transport = composerTransport,
+                )
+                draft = ""
+                focusManager.clearFocus()
+            }
         }
     }
 
@@ -482,7 +806,8 @@ private fun ConversationDeck(conversation: Conversation, onBack: () -> Unit) {
                 onDraftChange = { draft = it },
                 transport = composerTransport,
                 onTransportChange = { composerTransport = it },
-                onSend = ::sendDemo,
+                allowSecureTransport = !isRealSms,
+                onSend = ::sendMessage,
             )
         },
         modifier = Modifier.safeDrawingPadding(),
@@ -505,8 +830,8 @@ private fun ConversationDeck(conversation: Conversation, onBack: () -> Unit) {
                 }
                 item {
                     Text(
-                        "SECURE CHANNEL // VISUAL PROTOCOL PREVIEW",
-                        color = Violet.copy(alpha = 0.7f),
+                        if (isRealSms) "ANDROID TELEPHONY // LIVE SMS THREAD" else "SECURE CHANNEL // VISUAL PROTOCOL PREVIEW",
+                        color = if (isRealSms) Amber.copy(alpha = 0.7f) else Violet.copy(alpha = 0.7f),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp,
                         letterSpacing = 0.7.sp,
@@ -605,6 +930,7 @@ private fun Composer(
     onDraftChange: (String) -> Unit,
     transport: Transport,
     onTransportChange: (Transport) -> Unit,
+    allowSecureTransport: Boolean,
     onSend: () -> Unit,
 ) {
     val accent = if (transport == Transport.SECURE) Violet else Amber
@@ -618,7 +944,7 @@ private fun Composer(
             modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Transport.entries.forEach { option ->
+            Transport.entries.filter { allowSecureTransport || it == Transport.SMS }.forEach { option ->
                 val selected = option == transport
                 StatusChip(
                     text = option.label,
@@ -698,19 +1024,54 @@ private fun VesselsScreen(onOpenConversation: (Conversation) -> Unit) {
 }
 
 @Composable
-private fun SystemScreen() {
+private fun SystemScreen(
+    isDefaultSmsApp: Boolean,
+    hasSmsPermissions: Boolean,
+    onRequestSmsSetup: () -> Unit,
+) {
     Column(
         modifier = Modifier.fillMaxSize().padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        SystemCard("SMS ARRAY", "NOT CONNECTED", Amber, "Default-SMS integration arrives in the next transport slice.")
+        SystemCard(
+            "SMS ARRAY",
+            when {
+                !isDefaultSmsApp -> "ROLE REQUIRED"
+                !hasSmsPermissions -> "ACCESS REQUIRED"
+                else -> "ONLINE"
+            },
+            if (isDefaultSmsApp && hasSmsPermissions) Toxic else Amber,
+            when {
+                !isDefaultSmsApp -> "Select EutherPing as Android's default SMS handler to connect the carrier channel."
+                !hasSmsPermissions -> "The SMS role is active. Grant read, receive, send and write access to continue."
+                else -> "Live Android Telephony inbox and SMS transport are connected."
+            },
+            actionLabel = if (isDefaultSmsApp) "GRANT ACCESS" else "CONNECT SMS",
+            onAction = if (isDefaultSmsApp && hasSmsPermissions) null else onRequestSmsSetup,
+        )
         SystemCard("ECHO PROTOCOL", "DESIGN PHASE", Violet, "No encryption claim is made by this prototype.")
-        SystemCard("LOCAL VAULT", "EPHEMERAL DEMO", Toxic, "Demo messages disappear when the app process is reset.")
+        SystemCard(
+            "LOCAL VAULT",
+            if (isDefaultSmsApp && hasSmsPermissions) "ANDROID PROVIDER" else "DEMO ONLY",
+            Toxic,
+            if (isDefaultSmsApp && hasSmsPermissions) {
+                "SMS messages live in Android's system Telephony provider. Cloud backup is disabled."
+            } else {
+                "Secure preview messages disappear when the app process is reset."
+            },
+        )
     }
 }
 
 @Composable
-private fun SystemCard(title: String, state: String, color: Color, description: String) {
+private fun SystemCard(
+    title: String,
+    state: String,
+    color: Color,
+    description: String,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Panel),
         border = BorderStroke(1.dp, color.copy(alpha = 0.28f)),
@@ -722,6 +1083,15 @@ private fun SystemCard(title: String, state: String, color: Color, description: 
                 Text(state, color = color, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
             }
             Text(description, color = Muted, fontSize = 13.sp, modifier = Modifier.padding(top = 8.dp))
+            if (actionLabel != null && onAction != null) {
+                Button(
+                    onClick = onAction,
+                    colors = ButtonDefaults.buttonColors(containerColor = color, contentColor = Void),
+                    modifier = Modifier.padding(top = 12.dp),
+                ) {
+                    Text(actionLabel, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                }
+            }
         }
     }
 }
@@ -872,3 +1242,30 @@ private fun sampleConversations() = listOf(
     Conversation(4, "Verkstan", "VX", "Din beställning är klar att hämtas.", "18:52", Transport.SMS, 0, "CELL TOWER 2"),
     Conversation(5, "Niko", "NK", "Secure channel waiting for verification.", "YESTERDAY", Transport.SECURE, 0, "5.1 NM"),
 )
+
+private fun cellConversation(address: String, threadId: Long?): Conversation = Conversation(
+    id = threadId?.let { (100_000L + it).toInt() } ?: address.hashCode(),
+    name = address,
+    initials = addressInitials(address),
+    preview = "New SMS channel",
+    time = "NOW",
+    transport = Transport.SMS,
+    distance = "ANDROID TELEPHONY",
+    smsAddress = address,
+    threadId = threadId,
+)
+
+private fun addressInitials(address: String): String {
+    val compact = address.filter { it.isLetterOrDigit() }
+    return compact.takeLast(2).uppercase().ifBlank { "??" }
+}
+
+private fun formatMessageTime(timestamp: Long): String {
+    val message = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault())
+    val now = Instant.now().atZone(ZoneId.systemDefault())
+    return if (message.toLocalDate() == now.toLocalDate()) {
+        message.format(DateTimeFormatter.ofPattern("HH:mm"))
+    } else {
+        message.format(DateTimeFormatter.ofPattern("MMM d"))
+    }
+}

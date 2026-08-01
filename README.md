@@ -5,7 +5,9 @@ EutherPing is an original Android messaging project with two deliberately distin
 - ordinary carrier SMS/MMS (`CELL`)
 - future end-to-end encrypted app-to-app messaging (`SECURE PING`)
 
-The current `0.1.0` checkpoint is an interactive visual prototype. It does **not** yet send real SMS and does **not** claim to implement encryption. Its secure lane is explicitly marked as a protocol preview until the transport and audited cryptographic core exist.
+The current `0.2.0` checkpoint is a functional SMS beta. Once the user explicitly selects EutherPing as Android's default SMS handler and grants the SMS permissions, it reads real SMS conversations, receives incoming SMS, sends single- and multipart SMS, persists messages in Android's Telephony provider, and posts incoming-message notifications.
+
+The secure lane remains a visual protocol preview and does **not** claim to implement encryption. MMS entry points are declared so Android can offer the SMS role, but carrier MMS download, attachments, multi-SIM selection, contact names, blocking, backup, and secure app-to-app transport remain future work.
 
 ## Build
 
@@ -14,6 +16,10 @@ env JAVA_HOME=/usr/lib/jvm/java-17-openjdk ANDROID_HOME=/opt/android-sdk ./gradl
 ```
 
 The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
+
+## Privacy
+
+EutherPing 0.2.0 has no internet permission, accounts, analytics, ads, or telemetry. SMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. Incoming-message notifications are generated locally. Cloud backup and device transfer are disabled.
 
 ## Visual direction
 
