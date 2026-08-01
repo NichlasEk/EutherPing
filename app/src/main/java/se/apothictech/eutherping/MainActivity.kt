@@ -73,9 +73,12 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -83,6 +86,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -113,15 +117,38 @@ import se.apothictech.eutherping.contacts.ContactRepository
 import se.apothictech.eutherping.contacts.PhoneContact
 import se.apothictech.eutherping.sms.SmsRepository
 
-private val Void = Color(0xFF020604)
-private val Deep = Color(0xFF06100B)
-private val Panel = Color(0xE80A1510)
-private val Toxic = Color(0xFF8BFF62)
-private val ToxicSoft = Color(0xFF4FB847)
-private val Amber = Color(0xFFFF9D32)
-private val Violet = Color(0xFFC87CFF)
-private val Mist = Color(0xFFD7F7DC)
-private val Muted = Color(0xFF78927F)
+private val LocalLightTheme = staticCompositionLocalOf { false }
+
+private val Void: Color @Composable get() = MaterialTheme.colorScheme.background
+private val Deep: Color @Composable get() = MaterialTheme.colorScheme.surface
+private val Panel: Color @Composable get() = MaterialTheme.colorScheme.surfaceVariant
+private val Toxic: Color @Composable get() = MaterialTheme.colorScheme.primary
+private val ToxicSoft: Color @Composable get() = MaterialTheme.colorScheme.primaryContainer
+private val Amber: Color @Composable get() = MaterialTheme.colorScheme.secondary
+private val Violet: Color @Composable get() = MaterialTheme.colorScheme.tertiary
+private val Mist: Color @Composable get() = MaterialTheme.colorScheme.onBackground
+private val Muted: Color @Composable get() = MaterialTheme.colorScheme.outline
+
+private enum class AppTheme(val storedValue: String) {
+    COOL_DARK("cool_dark"),
+    LIGHT("light"),
+}
+
+private const val PREFERENCES_NAME = "eutherping_preferences"
+private const val THEME_PREFERENCE = "app_theme"
+
+private fun loadAppTheme(context: android.content.Context): AppTheme {
+    val stored = context.getSharedPreferences(PREFERENCES_NAME, android.content.Context.MODE_PRIVATE)
+        .getString(THEME_PREFERENCE, null)
+    return AppTheme.entries.firstOrNull { it.storedValue == stored } ?: AppTheme.COOL_DARK
+}
+
+private fun saveAppTheme(context: android.content.Context, theme: AppTheme) {
+    context.getSharedPreferences(PREFERENCES_NAME, android.content.Context.MODE_PRIVATE)
+        .edit()
+        .putString(THEME_PREFERENCE, theme.storedValue)
+        .apply()
+}
 
 enum class Transport(val label: String) {
     SECURE("SECURE PING"),
@@ -187,6 +214,7 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Unit) {
     val context = LocalContext.current
+    var appTheme by rememberSaveable { mutableStateOf(loadAppTheme(context)) }
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
     var setupRevision by remember { mutableIntStateOf(0) }
     val permissionsLauncher = rememberLauncherForActivityResult(
@@ -229,34 +257,81 @@ private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Un
             onAddressConsumed()
         }
     }
-    val scheme = darkColorScheme(
-        primary = Toxic,
-        onPrimary = Void,
-        secondary = Amber,
-        tertiary = Violet,
-        background = Void,
-        surface = Deep,
-        onBackground = Mist,
-        onSurface = Mist,
-    )
+    val isLightTheme = appTheme == AppTheme.LIGHT
+    val scheme = if (isLightTheme) {
+        lightColorScheme(
+            primary = Color(0xFF276F31),
+            onPrimary = Color.White,
+            primaryContainer = Color(0xFFBCE6C1),
+            secondary = Color(0xFFA54B00),
+            onSecondary = Color.White,
+            tertiary = Color(0xFF783A98),
+            onTertiary = Color.White,
+            background = Color(0xFFF0F7F1),
+            surface = Color(0xFFFAFDFA),
+            surfaceVariant = Color(0xFFE0ECE2),
+            onBackground = Color(0xFF102116),
+            onSurface = Color(0xFF102116),
+            outline = Color(0xFF607766),
+        )
+    } else {
+        darkColorScheme(
+            primary = Color(0xFF8BFF62),
+            onPrimary = Color(0xFF020604),
+            primaryContainer = Color(0xFF4FB847),
+            secondary = Color(0xFFFF9D32),
+            tertiary = Color(0xFFC87CFF),
+            background = Color(0xFF020604),
+            surface = Color(0xFF06100B),
+            surfaceVariant = Color(0xE80A1510),
+            onBackground = Color(0xFFD7F7DC),
+            onSurface = Color(0xFFD7F7DC),
+            outline = Color(0xFF78927F),
+        )
+    }
 
-    MaterialTheme(colorScheme = scheme) {
-        Surface(modifier = Modifier.fillMaxSize(), color = Void) {
-            AbyssBackground {
-                if (activeConversation == null) {
-                    SignalDeck(
-                        isDefaultSmsApp = isDefaultSmsApp,
-                        hasSmsPermissions = hasSmsPermissions,
-                        smsRevision = smsRevision,
-                        onRequestSmsSetup = ::requestSmsSetup,
-                        onOpenConversation = { activeConversation = it },
-                    )
-                } else {
-                    ConversationDeck(
-                        conversation = activeConversation!!,
-                        smsRevision = smsRevision,
-                        onBack = { activeConversation = null },
-                    )
+    SideEffect {
+        (context as? MainActivity)?.enableEdgeToEdge(
+            statusBarStyle = if (isLightTheme) {
+                SystemBarStyle.light(
+                    android.graphics.Color.TRANSPARENT,
+                    android.graphics.Color.TRANSPARENT,
+                )
+            } else {
+                SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+            },
+            navigationBarStyle = if (isLightTheme) {
+                SystemBarStyle.light(0xFFF0F7F1.toInt(), 0xFFF0F7F1.toInt())
+            } else {
+                SystemBarStyle.dark(android.graphics.Color.BLACK)
+            },
+        )
+    }
+
+    CompositionLocalProvider(LocalLightTheme provides isLightTheme) {
+        MaterialTheme(colorScheme = scheme) {
+            Surface(modifier = Modifier.fillMaxSize(), color = Void) {
+                AbyssBackground {
+                    if (activeConversation == null) {
+                        SignalDeck(
+                            isDefaultSmsApp = isDefaultSmsApp,
+                            hasSmsPermissions = hasSmsPermissions,
+                            smsRevision = smsRevision,
+                            appTheme = appTheme,
+                            onThemeChange = { selectedTheme ->
+                                appTheme = selectedTheme
+                                saveAppTheme(context, selectedTheme)
+                            },
+                            onRequestSmsSetup = ::requestSmsSetup,
+                            onOpenConversation = { activeConversation = it },
+                        )
+                    } else {
+                        ConversationDeck(
+                            conversation = activeConversation!!,
+                            smsRevision = smsRevision,
+                            onBack = { activeConversation = null },
+                        )
+                    }
                 }
             }
         }
@@ -287,12 +362,18 @@ private fun Intent.smsAddress(): String? {
 
 @Composable
 private fun AbyssBackground(content: @Composable () -> Unit) {
+    val lightTheme = LocalLightTheme.current
+    val background = Void
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(
                 Brush.radialGradient(
-                    colors = listOf(Color(0xFF102719), Void, Color.Black),
+                    colors = if (lightTheme) {
+                        listOf(Color(0xFFD6EAD9), background, Color(0xFFEAF4EC))
+                    } else {
+                        listOf(Color(0xFF102719), background, Color.Black)
+                    },
                     center = Offset(250f, 180f),
                     radius = 1_500f,
                 ),
@@ -300,7 +381,12 @@ private fun AbyssBackground(content: @Composable () -> Unit) {
             .drawBehind {
                 var y = 0f
                 while (y < size.height) {
-                    drawLine(Color.White.copy(alpha = 0.018f), Offset(0f, y), Offset(size.width, y), 1f)
+                    drawLine(
+                        (if (lightTheme) Color.Black else Color.White).copy(alpha = 0.018f),
+                        Offset(0f, y),
+                        Offset(size.width, y),
+                        1f,
+                    )
                     y += 8f
                 }
             },
@@ -314,6 +400,8 @@ private fun SignalDeck(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
     smsRevision: Int,
+    appTheme: AppTheme,
+    onThemeChange: (AppTheme) -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
 ) {
@@ -382,6 +470,8 @@ private fun SignalDeck(
                     SignalTab.SYSTEM -> SystemScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
                         hasSmsPermissions = hasSmsPermissions,
+                        appTheme = appTheme,
+                        onThemeChange = onThemeChange,
                         onRequestSmsSetup = onRequestSmsSetup,
                     )
                 }
@@ -417,7 +507,7 @@ private fun DeckHeader(onSearch: () -> Unit) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.2.1",
+                "ACOUSTIC MESSAGE TERMINAL 0.2.2",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -636,6 +726,11 @@ private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
 
 @Composable
 private fun SonarHero() {
+    val lightTheme = LocalLightTheme.current
+    val heroToxic = if (lightTheme) Color(0xFF8BFF62) else Toxic
+    val heroAmber = if (lightTheme) Color(0xFFFF9D32) else Amber
+    val heroMist = if (lightTheme) Color(0xFFD7F7DC) else Mist
+    val heroMuted = if (lightTheme) Color(0xFF8AA08F) else Muted
     Card(
         modifier = Modifier.fillMaxWidth().aspectRatio(1.75f),
         shape = RoundedCornerShape(22.dp),
@@ -662,11 +757,11 @@ private fun SonarHero() {
                 modifier = Modifier.align(Alignment.BottomStart).padding(16.dp),
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    PulseDot(Toxic)
+                    PulseDot(heroToxic)
                     Spacer(Modifier.width(7.dp))
                     Text(
                         "SONAR ARRAY ONLINE",
-                        color = Toxic,
+                        color = heroToxic,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         fontSize = 11.sp,
@@ -675,14 +770,14 @@ private fun SonarHero() {
                 }
                 Text(
                     "3 secure vessels within range",
-                    color = Mist,
+                    color = heroMist,
                     fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(top = 4.dp),
                 )
                 Text(
                     "Secure transport is a visual preview — no cryptographic channel is active yet.",
-                    color = Muted,
+                    color = heroMuted,
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
                     modifier = Modifier.padding(top = 3.dp),
@@ -690,7 +785,7 @@ private fun SonarHero() {
             }
             StatusChip(
                 text = "DEMO ARRAY",
-                color = Amber,
+                color = heroAmber,
                 modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
             )
         }
@@ -890,7 +985,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
 @Composable
 private fun ConversationHeader(conversation: Conversation, onBack: () -> Unit) {
     val accent = if (conversation.transport == Transport.SECURE) Violet else Amber
-    Column(modifier = Modifier.background(Color(0xF2050B08))) {
+    Column(modifier = Modifier.background(Deep)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -920,15 +1015,16 @@ private fun ConversationHeader(conversation: Conversation, onBack: () -> Unit) {
 
 @Composable
 private fun MessageBubble(message: DemoMessage) {
+    val lightTheme = LocalLightTheme.current
     val accent = if (message.outgoing) {
         if (message.transport == Transport.SECURE) Violet else Amber
     } else {
         Toxic
     }
     val bubbleColor = if (message.outgoing) {
-        accent.copy(alpha = 0.24f)
+        accent.copy(alpha = if (lightTheme) 0.17f else 0.24f)
     } else {
-        Color(0xE810281A)
+        Toxic.copy(alpha = if (lightTheme) 0.11f else 0.16f)
     }
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -1106,7 +1202,7 @@ private fun Composer(
     val accent = if (transport == Transport.SECURE) Violet else Amber
     Column(
         modifier = Modifier
-            .background(Color(0xFB050B08))
+            .background(Deep)
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 9.dp),
     ) {
@@ -1197,12 +1293,15 @@ private fun VesselsScreen(onOpenConversation: (Conversation) -> Unit) {
 private fun SystemScreen(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
+    appTheme: AppTheme,
+    onThemeChange: (AppTheme) -> Unit,
     onRequestSmsSetup: () -> Unit,
 ) {
     Column(
         modifier = Modifier.fillMaxSize().padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        ThemePickerCard(appTheme = appTheme, onThemeChange = onThemeChange)
         SystemCard(
             "SMS ARRAY",
             when {
@@ -1230,6 +1329,53 @@ private fun SystemScreen(
                 "Secure preview messages disappear when the app process is reset."
             },
         )
+    }
+}
+
+@Composable
+private fun ThemePickerCard(appTheme: AppTheme, onThemeChange: (AppTheme) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        border = BorderStroke(1.dp, Toxic.copy(alpha = 0.28f)),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                "DISPLAY ARRAY",
+                color = Mist,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "Choose a bright daytime sonar or the original nocturnal terminal.",
+                color = Muted,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 7.dp, bottom = 12.dp),
+            )
+            Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                AppTheme.entries.forEach { theme ->
+                    val selected = appTheme == theme
+                    val label = if (theme == AppTheme.LIGHT) "LIGHT" else "COOL DARK"
+                    Button(
+                        onClick = { onThemeChange(theme) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (selected) {
+                                if (theme == AppTheme.LIGHT) Amber else Violet
+                            } else {
+                                Panel
+                            },
+                            contentColor = if (selected) Color.White else Mist,
+                        ),
+                        border = BorderStroke(
+                            1.dp,
+                            (if (theme == AppTheme.LIGHT) Amber else Violet).copy(alpha = 0.6f),
+                        ),
+                    ) {
+                        Text(label, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1271,7 +1417,7 @@ private fun DeckNavigation(selected: SignalTab, onSelected: (SignalTab) -> Unit)
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xF7050B08))
+            .background(Deep)
             .navigationBarsPadding()
             .padding(horizontal = 10.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.SpaceEvenly,
@@ -1371,6 +1517,9 @@ private fun PulseDot(color: Color) {
 
 @Composable
 private fun MiniSonar(modifier: Modifier = Modifier) {
+    val toxic = Toxic
+    val amber = Amber
+    val violet = Violet
     val transition = rememberInfiniteTransition(label = "sonar")
     val rotation by transition.animateFloat(
         initialValue = 0f,
@@ -1380,15 +1529,15 @@ private fun MiniSonar(modifier: Modifier = Modifier) {
     )
     Canvas(modifier = modifier) {
         val radius = size.minDimension / 2f
-        drawCircle(Toxic.copy(alpha = 0.72f), radius, style = Stroke(1.5f))
-        drawCircle(Toxic.copy(alpha = 0.35f), radius * 0.64f, style = Stroke(1f))
-        drawCircle(Toxic.copy(alpha = 0.35f), radius * 0.3f, style = Stroke(1f))
+        drawCircle(toxic.copy(alpha = 0.72f), radius, style = Stroke(1.5f))
+        drawCircle(toxic.copy(alpha = 0.35f), radius * 0.64f, style = Stroke(1f))
+        drawCircle(toxic.copy(alpha = 0.35f), radius * 0.3f, style = Stroke(1f))
         val angle = Math.toRadians(rotation.toDouble())
         val end = Offset(
             center.x + kotlin.math.cos(angle).toFloat() * radius,
             center.y + kotlin.math.sin(angle).toFloat() * radius,
         )
-        drawLine(Toxic, center, end, 2f)
+        drawLine(toxic, center, end, 2f)
         val beam = Path().apply {
             moveTo(center.x, center.y)
             lineTo(end.x, end.y)
@@ -1399,9 +1548,9 @@ private fun MiniSonar(modifier: Modifier = Modifier) {
             )
             close()
         }
-        drawPath(beam, Toxic.copy(alpha = 0.11f))
-        drawCircle(Amber, 2.2f, Offset(center.x + radius * 0.42f, center.y - radius * 0.18f))
-        drawCircle(Violet, 2.2f, Offset(center.x - radius * 0.28f, center.y + radius * 0.45f))
+        drawPath(beam, toxic.copy(alpha = 0.11f))
+        drawCircle(amber, 2.2f, Offset(center.x + radius * 0.42f, center.y - radius * 0.18f))
+        drawCircle(violet, 2.2f, Offset(center.x - radius * 0.28f, center.y + radius * 0.45f))
     }
 }
 
