@@ -109,6 +109,8 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import androidx.core.view.WindowCompat
+import se.apothictech.eutherping.contacts.ContactRepository
+import se.apothictech.eutherping.contacts.PhoneContact
 import se.apothictech.eutherping.sms.SmsRepository
 
 private val Void = Color(0xFF020604)
@@ -315,11 +317,37 @@ private fun SignalDeck(
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
 ) {
+    val context = LocalContext.current
     var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
+    var showContactSearch by rememberSaveable { mutableStateOf(false) }
+    var contactPermissionRevision by remember { mutableIntStateOf(0) }
+    val contactsPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        contactPermissionRevision++
+        if (granted) showContactSearch = true
+    }
+    val hasContactsPermission = remember(contactPermissionRevision) {
+        ContactRepository.hasPermission(context)
+    }
+    val phoneContacts = remember(hasContactsPermission, contactPermissionRevision) {
+        if (hasContactsPermission) ContactRepository.loadPhoneContacts(context) else emptyList()
+    }
+
+    fun openContactSearch() {
+        if (ContactRepository.hasPermission(context)) {
+            showContactSearch = true
+        } else {
+            contactsPermissionLauncher.launch(Manifest.permission.READ_CONTACTS)
+        }
+    }
+
     Scaffold(
         containerColor = Color.Transparent,
         bottomBar = {
-            DeckNavigation(selectedTab, onSelected = { selectedTab = it })
+            if (!showContactSearch) {
+                DeckNavigation(selectedTab, onSelected = { selectedTab = it })
+            }
         },
         modifier = Modifier.safeDrawingPadding(),
     ) { insets ->
@@ -328,28 +356,42 @@ private fun SignalDeck(
                 .fillMaxSize()
                 .padding(insets),
         ) {
-            DeckHeader()
-            when (selectedTab) {
-                SignalTab.SIGNALS -> SignalsScreen(
-                    isDefaultSmsApp = isDefaultSmsApp,
-                    hasSmsPermissions = hasSmsPermissions,
-                    smsRevision = smsRevision,
-                    onRequestSmsSetup = onRequestSmsSetup,
-                    onOpenConversation = onOpenConversation,
+            if (showContactSearch) {
+                ContactSearchScreen(
+                    contacts = phoneContacts,
+                    onBack = { showContactSearch = false },
+                    onContactSelected = { contact ->
+                        showContactSearch = false
+                        onOpenConversation(
+                            cellConversation(contact.phoneNumber, null, contact.name),
+                        )
+                    },
                 )
-                SignalTab.CONTACTS -> VesselsScreen(onOpenConversation)
-                SignalTab.SYSTEM -> SystemScreen(
-                    isDefaultSmsApp = isDefaultSmsApp,
-                    hasSmsPermissions = hasSmsPermissions,
-                    onRequestSmsSetup = onRequestSmsSetup,
-                )
+            } else {
+                DeckHeader(onSearch = ::openContactSearch)
+                when (selectedTab) {
+                    SignalTab.SIGNALS -> SignalsScreen(
+                        isDefaultSmsApp = isDefaultSmsApp,
+                        hasSmsPermissions = hasSmsPermissions,
+                        smsRevision = smsRevision,
+                        phoneContacts = phoneContacts,
+                        onRequestSmsSetup = onRequestSmsSetup,
+                        onOpenConversation = onOpenConversation,
+                    )
+                    SignalTab.CONTACTS -> VesselsScreen(onOpenConversation)
+                    SignalTab.SYSTEM -> SystemScreen(
+                        isDefaultSmsApp = isDefaultSmsApp,
+                        hasSmsPermissions = hasSmsPermissions,
+                        onRequestSmsSetup = onRequestSmsSetup,
+                    )
+                }
             }
         }
     }
 }
 
 @Composable
-private fun DeckHeader() {
+private fun DeckHeader(onSearch: () -> Unit) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -375,15 +417,15 @@ private fun DeckHeader() {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.2",
+                "ACOUSTIC MESSAGE TERMINAL 0.2.1",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
                 letterSpacing = 0.7.sp,
             )
         }
-        IconButton(onClick = {}) {
-            Icon(Icons.Default.Search, contentDescription = "Search", tint = Muted)
+        IconButton(onClick = onSearch) {
+            Icon(Icons.Default.Search, contentDescription = "Search contacts", tint = Toxic)
         }
         IconButton(onClick = {}) {
             Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Muted)
@@ -396,19 +438,21 @@ private fun SignalsScreen(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
     smsRevision: Int,
+    phoneContacts: List<PhoneContact>,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
 ) {
     val context = LocalContext.current
     var showNewSignal by rememberSaveable { mutableStateOf(false) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
-    val smsConversations = remember(realSmsReady, smsRevision) {
+    val smsConversations = remember(realSmsReady, smsRevision, phoneContacts) {
         if (realSmsReady) {
             SmsRepository.loadThreads(context).map { thread ->
                 Conversation(
                     id = (100_000L + thread.threadId).toInt(),
-                    name = thread.address,
-                    initials = addressInitials(thread.address),
+                    name = ContactRepository.displayName(phoneContacts, thread.address) ?: thread.address,
+                    initials = ContactRepository.displayName(phoneContacts, thread.address)
+                        ?.let(::nameInitials) ?: addressInitials(thread.address),
                     preview = thread.body,
                     time = formatMessageTime(thread.timestamp),
                     transport = Transport.SMS,
@@ -876,14 +920,23 @@ private fun ConversationHeader(conversation: Conversation, onBack: () -> Unit) {
 
 @Composable
 private fun MessageBubble(message: DemoMessage) {
-    val accent = if (message.transport == Transport.SECURE) Violet else Amber
+    val accent = if (message.outgoing) {
+        if (message.transport == Transport.SECURE) Violet else Amber
+    } else {
+        Toxic
+    }
+    val bubbleColor = if (message.outgoing) {
+        accent.copy(alpha = 0.24f)
+    } else {
+        Color(0xE810281A)
+    }
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxWidth(0.82f)
+                .fillMaxWidth(0.78f)
                 .clip(
                     RoundedCornerShape(
                         topStart = 18.dp,
@@ -892,10 +945,10 @@ private fun MessageBubble(message: DemoMessage) {
                         bottomEnd = if (message.outgoing) 4.dp else 18.dp,
                     ),
                 )
-                .background(if (message.outgoing) accent.copy(alpha = 0.16f) else Panel)
+                .background(bubbleColor)
                 .border(
                     1.dp,
-                    accent.copy(alpha = if (message.outgoing) 0.45f else 0.2f),
+                    accent.copy(alpha = if (message.outgoing) 0.62f else 0.42f),
                     RoundedCornerShape(18.dp),
                 )
                 .padding(horizontal = 14.dp, vertical = 11.dp),
@@ -907,7 +960,10 @@ private fun MessageBubble(message: DemoMessage) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    if (message.transport == Transport.SECURE) "ECHO" else "CELL",
+                    buildString {
+                        append(if (message.outgoing) "YOU" else "THEM")
+                        append(if (message.transport == Transport.SECURE) " // ECHO" else " // CELL")
+                    },
                     color = accent.copy(alpha = 0.75f),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 8.sp,
@@ -920,6 +976,120 @@ private fun MessageBubble(message: DemoMessage) {
                     fontSize = 9.sp,
                 )
             }
+        }
+    }
+}
+
+@Composable
+private fun ContactSearchScreen(
+    contacts: List<PhoneContact>,
+    onBack: () -> Unit,
+    onContactSelected: (PhoneContact) -> Unit,
+) {
+    var query by rememberSaveable { mutableStateOf("") }
+    val normalizedQuery = query.trim()
+    val filteredContacts = remember(contacts, normalizedQuery) {
+        if (normalizedQuery.isBlank()) {
+            contacts
+        } else {
+            val phoneQuery = android.telephony.PhoneNumberUtils.normalizeNumber(normalizedQuery)
+            contacts.filter { contact ->
+                contact.name.contains(normalizedQuery, ignoreCase = true) ||
+                    contact.phoneNumber.contains(normalizedQuery, ignoreCase = true) ||
+                    (
+                        phoneQuery.isNotEmpty() &&
+                            android.telephony.PhoneNumberUtils.normalizeNumber(contact.phoneNumber)
+                                .contains(phoneQuery)
+                    )
+            }
+        }
+    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Toxic)
+            }
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                modifier = Modifier.weight(1f).padding(end = 12.dp),
+                placeholder = { Text("Search name or number") },
+                leadingIcon = {
+                    Icon(Icons.Default.Search, contentDescription = null, tint = Toxic)
+                },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = Toxic,
+                    unfocusedBorderColor = Toxic.copy(alpha = 0.3f),
+                    focusedTextColor = Mist,
+                    unfocusedTextColor = Mist,
+                    cursorColor = Toxic,
+                ),
+            )
+        }
+        Text(
+            "PHONEBOOK SONAR // ${filteredContacts.size} CONTACTS",
+            color = Toxic.copy(alpha = 0.72f),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 10.sp,
+            letterSpacing = 0.8.sp,
+            modifier = Modifier.padding(horizontal = 18.dp, vertical = 8.dp),
+        )
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(
+                start = 14.dp,
+                end = 14.dp,
+                bottom = 20.dp,
+            ),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            items(filteredContacts, key = { it.id }) { contact ->
+                ContactResultRow(contact, onClick = { onContactSelected(contact) })
+            }
+            if (filteredContacts.isEmpty()) {
+                item {
+                    Text(
+                        if (contacts.isEmpty()) "NO PHONE CONTACTS DETECTED" else "NO MATCHING VESSEL",
+                        color = Muted,
+                        fontFamily = FontFamily.Monospace,
+                        modifier = Modifier.fillMaxWidth().padding(24.dp),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ContactResultRow(contact: PhoneContact, onClick: () -> Unit) {
+    Card(
+        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        border = BorderStroke(1.dp, Toxic.copy(alpha = 0.22f)),
+        shape = RoundedCornerShape(15.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            VesselAvatar(nameInitials(contact.name), Toxic, size = 42)
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(contact.name, color = Mist, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Text(
+                    contact.phoneNumber,
+                    color = Toxic.copy(alpha = 0.72f),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(top = 3.dp),
+                )
+            }
+            Text("PING ›", color = Amber, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
         }
     }
 }
@@ -1243,10 +1413,14 @@ private fun sampleConversations() = listOf(
     Conversation(5, "Niko", "NK", "Secure channel waiting for verification.", "YESTERDAY", Transport.SECURE, 0, "5.1 NM"),
 )
 
-private fun cellConversation(address: String, threadId: Long?): Conversation = Conversation(
+private fun cellConversation(
+    address: String,
+    threadId: Long?,
+    contactName: String? = null,
+): Conversation = Conversation(
     id = threadId?.let { (100_000L + it).toInt() } ?: address.hashCode(),
-    name = address,
-    initials = addressInitials(address),
+    name = contactName ?: address,
+    initials = contactName?.let(::nameInitials) ?: addressInitials(address),
     preview = "New SMS channel",
     time = "NOW",
     transport = Transport.SMS,
@@ -1254,6 +1428,15 @@ private fun cellConversation(address: String, threadId: Long?): Conversation = C
     smsAddress = address,
     threadId = threadId,
 )
+
+private fun nameInitials(name: String): String = name
+    .trim()
+    .split(Regex("\\s+"))
+    .filter { it.isNotBlank() }
+    .take(2)
+    .mapNotNull { it.firstOrNull()?.uppercaseChar() }
+    .joinToString("")
+    .ifBlank { "??" }
 
 private fun addressInitials(address: String): String {
     val compact = address.filter { it.isLetterOrDigit() }
