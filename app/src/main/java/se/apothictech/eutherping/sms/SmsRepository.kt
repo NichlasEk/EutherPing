@@ -20,6 +20,7 @@ data class SmsThread(
     val body: String,
     val timestamp: Long,
     val unread: Int,
+    val incoming: Boolean,
 )
 
 data class SmsEntry(
@@ -62,6 +63,7 @@ object SmsRepository {
             Telephony.Sms.BODY,
             Telephony.Sms.DATE,
             Telephony.Sms.READ,
+            Telephony.Sms.TYPE,
         )
         val byThread = linkedMapOf<Long, SmsThread>()
         return runCatching {
@@ -77,6 +79,7 @@ object SmsRepository {
                 val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
                 val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
                 val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
+                val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
                 while (cursor.moveToNext()) {
                     val threadId = cursor.getLong(threadIndex)
                     val address = cursor.getString(addressIndex).orEmpty().ifBlank { "Unknown sender" }
@@ -89,6 +92,7 @@ object SmsRepository {
                             body = cursor.getString(bodyIndex).orEmpty(),
                             timestamp = cursor.getLong(dateIndex),
                             unread = unreadDelta,
+                            incoming = cursor.getInt(typeIndex) == Telephony.Sms.MESSAGE_TYPE_INBOX,
                         )
                     } else if (unreadDelta > 0) {
                         byThread[threadId] = existing.copy(unread = existing.unread + 1)

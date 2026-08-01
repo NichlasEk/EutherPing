@@ -16,6 +16,7 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import se.apothictech.eutherping.MainActivity
 import se.apothictech.eutherping.R
+import se.apothictech.eutherping.secure.SecureRepository
 
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -27,8 +28,9 @@ class SmsReceiver : BroadcastReceiver() {
             ?: "Unknown sender"
         val body = parts.joinToString(separator = "") { it.displayMessageBody.orEmpty() }
         val timestamp = parts.minOfOrNull { it.timestampMillis } ?: System.currentTimeMillis()
+        SecureRepository.handleIncomingControl(context, address, body)
         SmsRepository.persistIncoming(context, address, body, timestamp)
-        showNotification(context, address, body)
+        showNotification(context, address, SecureRepository.notificationText(context, address, body))
     }
 
     private fun showNotification(context: Context, address: String, body: String) {

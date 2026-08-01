@@ -2,12 +2,25 @@
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
 
-- ordinary carrier SMS/MMS (`CELL`)
-- future end-to-end encrypted app-to-app messaging (`SECURE PING`)
+- ordinary carrier SMS (`CELL`)
+- authenticated end-to-end encrypted capsules transported as carrier SMS (`SECURE PING`)
 
-The current `0.2.2` checkpoint is a functional SMS beta. Once the user explicitly selects EutherPing as Android's default SMS handler and grants the SMS permissions, it reads real SMS conversations, receives incoming SMS, sends single- and multipart SMS, persists messages in Android's Telephony provider, and posts incoming-message notifications. The header search opens an opt-in Android phonebook search, conversation bubbles clearly distinguish received messages on the left from sent messages on the right, and System offers persistent Light and Cool Dark themes.
+The current `0.3.0` checkpoint is a functional SMS and Secure Ping beta. Once the user explicitly selects EutherPing as Android's default SMS handler and grants the SMS permissions, it reads real SMS conversations, receives incoming SMS, sends single- and multipart SMS, persists messages in Android's Telephony provider, and posts incoming-message notifications. The header search opens an opt-in Android phonebook search, conversation bubbles clearly distinguish received messages on the left from sent messages on the right, and System offers persistent Light and Cool Dark themes.
 
-The secure lane remains a visual protocol preview and does **not** claim to implement encryption. MMS entry points are declared so Android can offer the SMS role, but carrier MMS download, attachments, multi-SIM selection, blocking, backup, and secure app-to-app transport remain future work.
+Secure Ping pairs two installations with signed invitation and acceptance capsules, shows the same safety code on both phones, and encrypts signed messages to the recipient's public key. It uses Google Tink's HPKE construction (X25519, HKDF-SHA-256, AES-256-GCM) and Ed25519 signatures. Private keysets and the local sent-message plaintext vault are protected by Android Keystore. No private key is placed in SMS or the Android Telephony provider.
+
+This is deliberately labelled **Secure Beta**. It does not yet implement a Double Ratchet, forward secrecy, post-compromise security, replay tracking, encrypted MMS/attachments, group encryption, or secure backups. Carrier metadata, delivery records, multipart-SMS cost, and the fact that two numbers communicate remain visible to the mobile network. MMS entry points are declared so Android can offer the SMS role, but carrier MMS download, attachments, multi-SIM selection, blocking, and backup remain future work.
+
+## Try Secure Ping on two phones
+
+1. Install the same APK on both Android phones and choose EutherPing as the default SMS app.
+2. Open an ordinary SMS thread between the two numbers.
+3. On phone A, tap `SEND SECURE INVITE`.
+4. On phone B, open the thread and tap `ACCEPT SECURE PING`.
+5. Compare the safety code shown on both phones. If every group matches, tap `CODES MATCH — VERIFY` on both.
+6. Select `SECURE PING` beside the composer and send a short test message.
+
+Invitations, acceptances, and encrypted messages are multipart carrier SMS, so the operator may charge for several SMS. Secure mode never silently falls back to plaintext SMS.
 
 ## Build
 
@@ -19,7 +32,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Privacy
 
-EutherPing 0.2.2 has no internet permission, accounts, analytics, ads, or telemetry. SMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. Phonebook data is read locally only after the separate Contacts permission is granted. Theme selection is stored only in local app preferences. Incoming-message notifications are generated locally. Cloud backup and device transfer are disabled.
+EutherPing 0.3.0 has no internet permission, accounts, analytics, ads, or telemetry. SMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. Secure Ping plaintext is decrypted only inside EutherPing; outgoing plaintext is stored in a Keystore-protected local vault so the sender can read their own history. Phonebook data is read locally only after the separate Contacts permission is granted. Theme selection is stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
 
 ## Visual direction
 
@@ -27,6 +40,6 @@ Near-black OLED surfaces, toxic-green sonar geometry, amber carrier signals, and
 
 ## Security direction
 
-EutherPing will own its wire framing, product semantics, versioning, test vectors, and downgrade protections while relying on established cryptographic constructions. No silent fallback from a secure session to SMS will be allowed.
+EutherPing owns its `EP1I`, `EP1A`, and `EP1M` wire framing, product semantics, and versioning while relying on established cryptographic constructions. No silent fallback from Secure Ping to plaintext SMS is allowed. The next security milestone is a reviewed session protocol with replay protection and a Double Ratchet instead of adding home-grown cryptographic primitives.
 
 License selection is intentionally deferred until the first product architecture is settled.

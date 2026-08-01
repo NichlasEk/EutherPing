@@ -115,6 +115,8 @@ import java.time.format.DateTimeFormatter
 import androidx.core.view.WindowCompat
 import se.apothictech.eutherping.contacts.ContactRepository
 import se.apothictech.eutherping.contacts.PhoneContact
+import se.apothictech.eutherping.secure.SecurePeerState
+import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.sms.SmsRepository
 
 private val LocalLightTheme = staticCompositionLocalOf { false }
@@ -507,7 +509,7 @@ private fun DeckHeader(onSearch: () -> Unit) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.2.2",
+                "ACOUSTIC MESSAGE TERMINAL 0.3.0",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -538,16 +540,33 @@ private fun SignalsScreen(
     val smsConversations = remember(realSmsReady, smsRevision, phoneContacts) {
         if (realSmsReady) {
             SmsRepository.loadThreads(context).map { thread ->
+                val decoded = SecureRepository.decodeForDisplay(
+                    context = context,
+                    address = thread.address,
+                    body = thread.body,
+                    incoming = thread.incoming,
+                )
+                val securePeer = SecureRepository.peer(context, thread.address)
                 Conversation(
                     id = (100_000L + thread.threadId).toInt(),
                     name = ContactRepository.displayName(phoneContacts, thread.address) ?: thread.address,
                     initials = ContactRepository.displayName(phoneContacts, thread.address)
                         ?.let(::nameInitials) ?: addressInitials(thread.address),
-                    preview = thread.body,
+                    preview = decoded?.text ?: thread.body,
                     time = formatMessageTime(thread.timestamp),
-                    transport = Transport.SMS,
+                    transport = if (decoded?.isSecure == true || securePeer.state != SecurePeerState.NONE) {
+                        Transport.SECURE
+                    } else {
+                        Transport.SMS
+                    },
                     unread = thread.unread,
-                    distance = "ANDROID TELEPHONY",
+                    distance = when (securePeer.state) {
+                        SecurePeerState.VERIFIED -> "IDENTITY VERIFIED"
+                        SecurePeerState.ACTIVE_UNVERIFIED -> "KEY UNVERIFIED"
+                        SecurePeerState.INVITE_RECEIVED -> "INVITE RECEIVED"
+                        SecurePeerState.INVITE_SENT -> "AWAITING ECHO"
+                        SecurePeerState.NONE -> "ANDROID TELEPHONY"
+                    },
                     smsAddress = thread.address,
                     threadId = thread.threadId,
                 )
@@ -558,7 +577,7 @@ private fun SignalsScreen(
     }
     val conversations = remember(realSmsReady, smsConversations) {
         if (realSmsReady) {
-            smsConversations + sampleConversations().filter { it.transport == Transport.SECURE }
+            smsConversations
         } else {
             sampleConversations()
         }
@@ -584,7 +603,12 @@ private fun SignalsScreen(
                 NewCellSignalButton(onClick = { showNewSignal = true })
             }
         }
-        item { SonarHero() }
+        item {
+            SonarHero(
+                secureBetaReady = realSmsReady,
+                secureVessels = conversations.count { it.transport == Transport.SECURE },
+            )
+        }
         item {
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp),
@@ -725,7 +749,10 @@ private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
 }
 
 @Composable
-private fun SonarHero() {
+private fun SonarHero(
+    secureBetaReady: Boolean,
+    secureVessels: Int,
+) {
     val lightTheme = LocalLightTheme.current
     val heroToxic = if (lightTheme) Color(0xFF8BFF62) else Toxic
     val heroAmber = if (lightTheme) Color(0xFFFF9D32) else Amber
@@ -769,14 +796,22 @@ private fun SonarHero() {
                     )
                 }
                 Text(
-                    "3 secure vessels within range",
+                    if (secureBetaReady) {
+                        "$secureVessels secure ${if (secureVessels == 1) "vessel" else "vessels"} in the log"
+                    } else {
+                        "Secure Ping is ready to arm"
+                    },
                     color = heroMist,
                     fontSize = 19.sp,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.padding(top = 4.dp),
                 )
                 Text(
-                    "Secure transport is a visual preview — no cryptographic channel is active yet.",
+                    if (secureBetaReady) {
+                        "Pair by signed SMS, compare the safety code, then emit authenticated encrypted pings."
+                    } else {
+                        "Enable EutherPing as the SMS app to pair and exchange encrypted SMS capsules."
+                    },
                     color = heroMuted,
                     fontSize = 10.sp,
                     lineHeight = 14.sp,
@@ -784,7 +819,7 @@ private fun SonarHero() {
                 )
             }
             StatusChip(
-                text = "DEMO ARRAY",
+                text = if (secureBetaReady) "SECURE BETA" else "ARRAY STANDBY",
                 color = heroAmber,
                 modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
             )
@@ -870,6 +905,7 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
 @Composable
 private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBack: () -> Unit) {
     val context = LocalContext.current
+    var secureRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     val demoMessages = remember(conversation.id) {
         mutableStateListOf(
             DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", Transport.SECURE),
@@ -878,19 +914,32 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         )
     }
     val isRealSms = conversation.smsAddress != null
-    val realMessages = remember(conversation.threadId, conversation.smsAddress, smsRevision) {
+    val securePeer = remember(conversation.smsAddress, smsRevision, secureRevision) {
+        if (isRealSms) {
+            SecureRepository.peer(context, conversation.smsAddress.orEmpty())
+        } else {
+            null
+        }
+    }
+    val realMessages = remember(conversation.threadId, conversation.smsAddress, smsRevision, secureRevision) {
         if (isRealSms) {
             SmsRepository.loadMessages(
                 context = context,
                 threadId = conversation.threadId,
                 address = conversation.smsAddress.orEmpty(),
             ).map { message ->
+                val decoded = SecureRepository.decodeForDisplay(
+                    context = context,
+                    address = conversation.smsAddress.orEmpty(),
+                    body = message.body,
+                    incoming = message.incoming,
+                )
                 DemoMessage(
                     id = message.id,
-                    text = message.body,
+                    text = decoded?.text ?: message.body,
                     outgoing = !message.incoming,
                     time = formatMessageTime(message.timestamp),
-                    transport = Transport.SMS,
+                    transport = if (decoded?.isSecure == true) Transport.SECURE else Transport.SMS,
                 )
             }
         } else {
@@ -899,7 +948,9 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
     val messages = if (isRealSms) realMessages else demoMessages
     var composerTransport by rememberSaveable(conversation.id) {
-        mutableStateOf(if (isRealSms) Transport.SMS else conversation.transport)
+        mutableStateOf(
+            if (isRealSms && securePeer?.canEncrypt == true) conversation.transport else Transport.SMS,
+        )
     }
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
@@ -912,15 +963,30 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         val text = draft.trim()
         if (text.isNotEmpty()) {
             if (isRealSms) {
-                SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), text)
+                val outgoing = if (composerTransport == Transport.SECURE) {
+                    SecureRepository.encryptMessage(context, conversation.smsAddress.orEmpty(), text)
+                } else {
+                    Result.success(text)
+                }
+                outgoing.flatMap { wireBody ->
+                    SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), wireBody)
+                }
                     .onSuccess {
                         draft = ""
                         focusManager.clearFocus()
-                        Toast.makeText(context, "SMS queued", Toast.LENGTH_SHORT).show()
+                        Toast.makeText(
+                            context,
+                            if (composerTransport == Transport.SECURE) {
+                                "Encrypted Secure Ping queued"
+                            } else {
+                                "SMS queued"
+                            },
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
                     .onFailure {
-                        Log.e("EutherPingSms", "SMS send failed", it)
-                        Toast.makeText(context, "SMS failed: ${it.message}", Toast.LENGTH_LONG).show()
+                        Log.e("EutherPingSms", "Message send failed", it)
+                        Toast.makeText(context, "Send failed: ${it.message}", Toast.LENGTH_LONG).show()
                     }
             } else {
                 demoMessages += DemoMessage(
@@ -938,14 +1004,14 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
 
     Scaffold(
         containerColor = Color.Transparent,
-        topBar = { ConversationHeader(conversation, onBack) },
+        topBar = { ConversationHeader(conversation, securePeer?.state, onBack) },
         bottomBar = {
             Composer(
                 draft = draft,
                 onDraftChange = { draft = it },
                 transport = composerTransport,
                 onTransportChange = { composerTransport = it },
-                allowSecureTransport = !isRealSms,
+                allowSecureTransport = isRealSms && securePeer?.canEncrypt == true,
                 onSend = ::sendMessage,
             )
         },
@@ -967,9 +1033,55 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 items(messages.asReversed(), key = { it.id }) { message ->
                     MessageBubble(message)
                 }
+                if (isRealSms) {
+                    item {
+                        SecurePairingCard(
+                            peerState = securePeer?.state ?: SecurePeerState.NONE,
+                            safetyNumber = SecureRepository.safetyNumber(
+                                context,
+                                conversation.smsAddress.orEmpty(),
+                            ),
+                            onInvite = {
+                                SecureRepository.createInvitation(
+                                    context,
+                                    conversation.smsAddress.orEmpty(),
+                                ).flatMap { SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), it) }
+                                    .onSuccess {
+                                        secureRevision++
+                                        Toast.makeText(context, "Secure invitation sent", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .onFailure {
+                                        Toast.makeText(context, "Invite failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                    }
+                            },
+                            onAccept = {
+                                SecureRepository.acceptInvitation(
+                                    context,
+                                    conversation.smsAddress.orEmpty(),
+                                ).flatMap { SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), it) }
+                                    .onSuccess {
+                                        composerTransport = Transport.SECURE
+                                        secureRevision++
+                                        Toast.makeText(context, "Secure channel accepted", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .onFailure {
+                                        Toast.makeText(context, "Accept failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                    }
+                            },
+                            onVerify = {
+                                SecureRepository.markVerified(context, conversation.smsAddress.orEmpty())
+                                secureRevision++
+                            },
+                        )
+                    }
+                }
                 item {
                     Text(
-                        if (isRealSms) "ANDROID TELEPHONY // LIVE SMS THREAD" else "SECURE CHANNEL // VISUAL PROTOCOL PREVIEW",
+                        if (isRealSms) {
+                            "ANDROID TELEPHONY // SECURE BETA USES ENCRYPTED SMS CAPSULES"
+                        } else {
+                            "SECURE CHANNEL // VISUAL PROTOCOL PREVIEW"
+                        },
                         color = if (isRealSms) Amber.copy(alpha = 0.7f) else Violet.copy(alpha = 0.7f),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp,
@@ -983,7 +1095,11 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
 }
 
 @Composable
-private fun ConversationHeader(conversation: Conversation, onBack: () -> Unit) {
+private fun ConversationHeader(
+    conversation: Conversation,
+    securePeerState: SecurePeerState?,
+    onBack: () -> Unit,
+) {
     val accent = if (conversation.transport == Transport.SECURE) Violet else Amber
     Column(modifier = Modifier.background(Deep)) {
         Row(
@@ -998,7 +1114,17 @@ private fun ConversationHeader(conversation: Conversation, onBack: () -> Unit) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(conversation.name, color = Mist, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                 Text(
-                    if (conversation.transport == Transport.SECURE) "IN SECURE RANGE // KEY UNVERIFIED" else "CELLULAR CONTACT",
+                    when (securePeerState) {
+                        SecurePeerState.VERIFIED -> "SECURE BETA // IDENTITY VERIFIED"
+                        SecurePeerState.ACTIVE_UNVERIFIED -> "SECURE BETA // COMPARE SAFETY CODE"
+                        SecurePeerState.INVITE_RECEIVED -> "SECURE INVITATION RECEIVED"
+                        SecurePeerState.INVITE_SENT -> "SECURE INVITATION IN TRANSIT"
+                        else -> if (conversation.transport == Transport.SECURE) {
+                            "SECURE PREVIEW // NO LIVE KEYS"
+                        } else {
+                            "CELLULAR CONTACT"
+                        }
+                    },
                     color = accent,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp,
@@ -1191,6 +1317,91 @@ private fun ContactResultRow(contact: PhoneContact, onClick: () -> Unit) {
 }
 
 @Composable
+private fun SecurePairingCard(
+    peerState: SecurePeerState,
+    safetyNumber: String?,
+    onInvite: () -> Unit,
+    onAccept: () -> Unit,
+    onVerify: () -> Unit,
+) {
+    val active = peerState in setOf(SecurePeerState.ACTIVE_UNVERIFIED, SecurePeerState.VERIFIED)
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Violet.copy(alpha = 0.1f)),
+        border = BorderStroke(1.dp, Violet.copy(alpha = 0.5f)),
+        shape = RoundedCornerShape(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(15.dp)) {
+            Text(
+                when (peerState) {
+                    SecurePeerState.NONE -> "SECURE PING // NOT PAIRED"
+                    SecurePeerState.INVITE_SENT -> "SECURE PING // AWAITING ECHO"
+                    SecurePeerState.INVITE_RECEIVED -> "SECURE PING // INVITE DETECTED"
+                    SecurePeerState.ACTIVE_UNVERIFIED -> "SECURE BETA // KEY UNVERIFIED"
+                    SecurePeerState.VERIFIED -> "SECURE BETA // IDENTITY VERIFIED"
+                },
+                color = Violet,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Black,
+                letterSpacing = 0.7.sp,
+            )
+            Text(
+                when (peerState) {
+                    SecurePeerState.NONE -> "Send a signed EutherPing key invitation as an ordinary multipart SMS."
+                    SecurePeerState.INVITE_SENT -> "The other phone must open this thread and accept the invitation."
+                    SecurePeerState.INVITE_RECEIVED -> "Accept to return this phone's public keys and enable encrypted SMS capsules."
+                    SecurePeerState.ACTIVE_UNVERIFIED -> "Compare this safety code on both phones before marking the identity verified."
+                    SecurePeerState.VERIFIED -> "Messages use authenticated HPKE capsules over carrier SMS. Carrier charges may apply."
+                },
+                color = Mist,
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                modifier = Modifier.padding(top = 7.dp),
+            )
+            if (active && safetyNumber != null) {
+                Text(
+                    safetyNumber,
+                    color = Toxic,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 13.sp,
+                    letterSpacing = 0.9.sp,
+                    modifier = Modifier.padding(top = 11.dp),
+                )
+            }
+            Text(
+                "SECURE BETA: no Double Ratchet or forward-secrecy claim yet.",
+                color = Amber.copy(alpha = 0.82f),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+                modifier = Modifier.padding(top = 9.dp),
+            )
+            when (peerState) {
+                SecurePeerState.NONE -> Button(
+                    onClick = onInvite,
+                    colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Color.White),
+                    modifier = Modifier.padding(top = 11.dp),
+                ) { Text("SEND SECURE INVITE", fontWeight = FontWeight.Black) }
+                SecurePeerState.INVITE_SENT -> TextButton(onClick = onInvite) {
+                    Text("RESEND INVITE", color = Violet)
+                }
+                SecurePeerState.INVITE_RECEIVED -> Button(
+                    onClick = onAccept,
+                    colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Color.White),
+                    modifier = Modifier.padding(top = 11.dp),
+                ) { Text("ACCEPT SECURE PING", fontWeight = FontWeight.Black) }
+                SecurePeerState.ACTIVE_UNVERIFIED -> Button(
+                    onClick = onVerify,
+                    colors = ButtonDefaults.buttonColors(containerColor = Toxic, contentColor = Void),
+                    modifier = Modifier.padding(top = 11.dp),
+                ) { Text("CODES MATCH — VERIFY", fontWeight = FontWeight.Black) }
+                SecurePeerState.VERIFIED -> Unit
+            }
+        }
+    }
+}
+
+@Composable
 private fun Composer(
     draft: String,
     onDraftChange: (String) -> Unit,
@@ -1297,6 +1508,8 @@ private fun SystemScreen(
     onThemeChange: (AppTheme) -> Unit,
     onRequestSmsSetup: () -> Unit,
 ) {
+    val context = LocalContext.current
+    val secureIdentity = remember { SecureRepository.ensureIdentity(context) }
     Column(
         modifier = Modifier.fillMaxSize().padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -1318,7 +1531,17 @@ private fun SystemScreen(
             actionLabel = if (isDefaultSmsApp) "GRANT ACCESS" else "CONNECT SMS",
             onAction = if (isDefaultSmsApp && hasSmsPermissions) null else onRequestSmsSetup,
         )
-        SystemCard("ECHO PROTOCOL", "DESIGN PHASE", Violet, "No encryption claim is made by this prototype.")
+        SystemCard(
+            "ECHO PROTOCOL",
+            if (secureIdentity.isSuccess) "SECURE BETA READY" else "KEYSTORE ERROR",
+            if (secureIdentity.isSuccess) Violet else Amber,
+            secureIdentity.fold(
+                onSuccess = {
+                    "HPKE X25519 + Ed25519 identity is protected by Android Keystore. Device fingerprint: $it. Double Ratchet is not implemented yet."
+                },
+                onFailure = { "Secure Ping remains disabled: ${it.message}" },
+            ),
+        )
         SystemCard(
             "LOCAL VAULT",
             if (isDefaultSmsApp && hasSmsPermissions) "ANDROID PROVIDER" else "DEMO ONLY",
@@ -1326,7 +1549,7 @@ private fun SystemScreen(
             if (isDefaultSmsApp && hasSmsPermissions) {
                 "SMS messages live in Android's system Telephony provider. Cloud backup is disabled."
             } else {
-                "Secure preview messages disappear when the app process is reset."
+                "Secure private keys and outgoing plaintext copies are encrypted under Android Keystore."
             },
         )
     }
@@ -1591,6 +1814,11 @@ private fun addressInitials(address: String): String {
     val compact = address.filter { it.isLetterOrDigit() }
     return compact.takeLast(2).uppercase().ifBlank { "??" }
 }
+
+private inline fun <T, R> Result<T>.flatMap(transform: (T) -> Result<R>): Result<R> = fold(
+    onSuccess = transform,
+    onFailure = { Result.failure(it) },
+)
 
 private fun formatMessageTime(timestamp: Long): String {
     val message = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault())
