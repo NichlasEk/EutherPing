@@ -1,0 +1,10 @@
+<resources>
+    <style name="Theme.EutherPing" parent="android:style/Theme.Material.NoActionBar">
+        <item name="android:fontFamily">sans</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:navigationBarColor">@color/euther_void</item>
+        <item name="android:statusBarColor">@color/euther_void</item>
+        <item name="android:windowBackground">@color/euther_void</item>
+    </style>
+</resources>
