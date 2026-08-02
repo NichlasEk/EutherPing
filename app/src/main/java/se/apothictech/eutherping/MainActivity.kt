@@ -521,7 +521,7 @@ private fun DeckHeader(onSearch: () -> Unit) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.3.2",
+                "ACOUSTIC MESSAGE TERMINAL 0.3.3",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -1042,9 +1042,6 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
             ) {
-                items(messages.asReversed(), key = { it.id }) { message ->
-                    MessageBubble(message)
-                }
                 if (isRealSms) {
                     item {
                         SecurePairingCard(
@@ -1086,6 +1083,9 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                             },
                         )
                     }
+                }
+                items(messages.asReversed(), key = { it.id }) { message ->
+                    MessageBubble(message)
                 }
                 item {
                     Text(
