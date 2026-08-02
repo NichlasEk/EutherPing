@@ -10,7 +10,7 @@ class TransportTest {
     @Test
     fun `secure transport never looks like sms`() {
         assertEquals("SECURE PING", Transport.SECURE.label)
-        assertEquals("CELL // SMS", Transport.SMS.label)
+        assertEquals("CELL // SMS + MMS", Transport.SMS.label)
     }
 
     @Test
@@ -18,6 +18,7 @@ class TransportTest {
         assertTrue(SecureRepository.isSecureBody("EP2I:invite"))
         assertTrue(SecureRepository.isSecureBody("EP2A:accept"))
         assertTrue(SecureRepository.isSecureBody("EP1M:message"))
+        assertTrue(SecureRepository.isSecureBody("EP1F:attachment"))
         assertFalse(SecureRepository.isSecureBody("ordinary carrier SMS"))
     }
 }

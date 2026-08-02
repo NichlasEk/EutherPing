@@ -12,8 +12,8 @@ android {
         applicationId = "se.apothictech.eutherping"
         minSdk = 28
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.4.0"
+        versionCode = 11
+        versionName = "0.6.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -50,8 +50,16 @@ dependencies {
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.core:core-ktx:1.17.0")
+    implementation("com.klinkerapps:android-smsmms:5.2.6") {
+        isTransitive = false
+    }
+    implementation("com.klinkerapps:logger:1.0.3") {
+        isTransitive = false
+    }
     implementation("com.google.crypto.tink:tink-android:1.23.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation("androidx.test:runner:1.7.0")
     testImplementation("junit:junit:4.13.2")
 }

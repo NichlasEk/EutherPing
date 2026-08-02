@@ -1,0 +1,51 @@
+package se.apothictech.eutherping.sms
+
+import android.graphics.Bitmap
+import androidx.core.content.FileProvider
+import androidx.test.core.app.ApplicationProvider
+import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import java.io.File
+
+@RunWith(AndroidJUnit4::class)
+class CarrierMmsRepositoryTest {
+    @Test
+    fun composesAndPersistsCarrierImageBeforeSystemTransport() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("cmd role add-role-holder android.app.role.SMS ${context.packageName}")
+            .close()
+        Thread.sleep(500)
+        assertTrue("Test app did not become the default SMS handler", SmsRepository.isDefaultSmsApp(context))
+        assertTrue("SMS role did not grant required permissions", SmsRepository.hasSmsPermissions(context))
+        val directory = File(context.cacheDir, "mms_transport").apply { mkdirs() }
+        val source = File(directory, "instrumentation-source.jpg")
+        Bitmap.createBitmap(48, 48, Bitmap.Config.ARGB_8888).let { bitmap ->
+            source.outputStream().use { bitmap.compress(Bitmap.CompressFormat.JPEG, 90, it) }
+            bitmap.recycle()
+        }
+        val sourceUri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.securefiles",
+            source,
+        )
+
+        val result = CarrierMmsRepository.sendImage(
+            context,
+            "15551234567",
+            "EutherPing carrier MMS instrumentation",
+            sourceUri,
+        )
+
+        assertTrue(result.exceptionOrNull()?.message.orEmpty(), result.isSuccess)
+        val messageUri = result.getOrThrow()
+        context.contentResolver.query(messageUri, arrayOf("_id", "msg_box"), null, null, null)?.use {
+            assertTrue(it.moveToFirst())
+            assertNotNull(it.getString(0))
+        }
+    }
+}

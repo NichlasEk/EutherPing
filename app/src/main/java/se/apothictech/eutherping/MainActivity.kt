@@ -85,6 +85,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
@@ -117,8 +118,15 @@ import androidx.core.view.WindowCompat
 import se.apothictech.eutherping.contacts.ContactRepository
 import se.apothictech.eutherping.contacts.PhoneContact
 import se.apothictech.eutherping.secure.SecurePeerState
+import se.apothictech.eutherping.secure.SecureAttachmentDescriptor
+import se.apothictech.eutherping.secure.SecureAttachmentRepository
 import se.apothictech.eutherping.secure.SecureRepository
+import se.apothictech.eutherping.sms.CarrierMmsAttachment
+import se.apothictech.eutherping.sms.CarrierMmsRepository
 import se.apothictech.eutherping.sms.SmsRepository
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private val LocalLightTheme = staticCompositionLocalOf { false }
 
@@ -155,7 +163,7 @@ private fun saveAppTheme(context: android.content.Context, theme: AppTheme) {
 
 enum class Transport(val label: String) {
     SECURE("SECURE PING"),
-    SMS("CELL // SMS"),
+    SMS("CELL // SMS + MMS"),
 }
 
 private enum class SignalTab(val label: String) {
@@ -183,6 +191,8 @@ private data class DemoMessage(
     val outgoing: Boolean,
     val time: String,
     val transport: Transport,
+    val attachment: SecureAttachmentDescriptor? = null,
+    val carrierMmsAttachment: CarrierMmsAttachment? = null,
 )
 
 class MainActivity : ComponentActivity() {
@@ -193,6 +203,10 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         requestedAddress = intent.smsAddress()
         requestedSecureLane = intent.getBooleanExtra(EXTRA_SECURE_LANE, false)
+        SecureAttachmentRepository.clearTransientPlaintext(this)
+        SecureAttachmentRepository.ensureServerStarted(this).onFailure {
+            Log.w("EutherPingAttachment", "Direct Wi-Fi attachment server is unavailable", it)
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
@@ -380,6 +394,7 @@ private fun rememberSmsRevision(enabled: Boolean): Int {
             }
         }
         context.contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
+        context.contentResolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, observer)
         onDispose { context.contentResolver.unregisterContentObserver(observer) }
     }
     return revision
@@ -565,7 +580,7 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.4.0",
+                "ACOUSTIC MESSAGE TERMINAL 0.6.0",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -603,7 +618,7 @@ private fun SignalsScreen(
                     threadId = thread.threadId,
                     address = thread.address,
                 ).filter { message ->
-                    SecureRepository.decodeForDisplay(
+                    message.isMms || SecureRepository.decodeForDisplay(
                         context = context,
                         address = thread.address,
                         body = message.body,
@@ -862,7 +877,7 @@ private fun SonarHero(
                 )
                 Text(
                     if (smsReady) {
-                        "Ordinary carrier SMS stays here. Secure identities and encrypted pings live under Vessels."
+                        "Ordinary carrier SMS and MMS stay here. Secure identities and encrypted pings live under Vessels."
                     } else {
                         "Enable EutherPing as the SMS app to pair and exchange encrypted SMS capsules."
                     },
@@ -959,7 +974,10 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
 @Composable
 private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBack: () -> Unit) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var secureRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
+    var attachmentRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
+    var attachmentBusy by remember(conversation.smsAddress) { mutableStateOf(false) }
     val demoMessages = remember(conversation.id) {
         mutableStateListOf(
             DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", conversation.transport),
@@ -976,14 +994,20 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             null
         }
     }
-    val realMessages = remember(conversation.threadId, conversation.smsAddress, smsRevision, secureRevision) {
+    val realMessages = remember(
+        conversation.threadId,
+        conversation.smsAddress,
+        smsRevision,
+        secureRevision,
+        attachmentRevision,
+    ) {
         if (isRealSms) {
             SmsRepository.loadMessages(
                 context = context,
                 threadId = conversation.threadId,
                 address = conversation.smsAddress.orEmpty(),
             ).mapNotNull { message ->
-                val decoded = SecureRepository.decodeForDisplay(
+                val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
                     context = context,
                     address = conversation.smsAddress.orEmpty(),
                     body = message.body,
@@ -996,6 +1020,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     outgoing = !message.incoming,
                     time = formatMessageTime(message.timestamp),
                     transport = conversation.transport,
+                    attachment = decoded?.attachment,
+                    carrierMmsAttachment = message.mmsAttachment,
                 )
             }
         } else {
@@ -1008,6 +1034,60 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
+    val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null && isRealSms && (!secureLane || securePeer?.canEncrypt == true)) {
+            attachmentBusy = true
+            coroutineScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    if (secureLane) {
+                        SecureAttachmentRepository.prepareOutgoing(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            uri,
+                        ).flatMap { prepared ->
+                            SmsRepository.sendText(
+                                context,
+                                conversation.smsAddress.orEmpty(),
+                                prepared.wireBody,
+                            )
+                        }
+                    } else {
+                        CarrierMmsRepository.sendImage(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            draft,
+                            uri,
+                        )
+                    }
+                }
+                attachmentBusy = false
+                result.onSuccess {
+                    if (!secureLane) draft = ""
+                    attachmentRevision++
+                    Toast.makeText(
+                        context,
+                        if (secureLane) {
+                            "Encrypted attachment offered over direct Wi-Fi"
+                        } else {
+                            "Carrier MMS queued"
+                        },
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }.onFailure {
+                    Log.e("EutherPingAttachment", "Attachment send failed", it)
+                    Toast.makeText(
+                        context,
+                        if (secureLane) {
+                            "Attachment failed: ${it.message}"
+                        } else {
+                            "Carrier MMS failed: ${it.message}"
+                        },
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        }
+    }
 
     LaunchedEffect(conversation.threadId) {
         if (isRealSms) SmsRepository.markThreadRead(context, conversation.threadId)
@@ -1067,6 +1147,11 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 onTransportChange = { composerTransport = it },
                 secureOnly = secureLane,
                 enabled = !secureLane || securePeer?.canEncrypt == true,
+                attachmentBusy = attachmentBusy,
+                attachmentEnabled = isRealSms,
+                onAttachment = {
+                    attachmentPicker.launch(arrayOf(if (secureLane) "*/*" else "image/*"))
+                },
                 onSend = ::sendMessage,
             )
         },
@@ -1128,14 +1213,55 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     }
                 }
                 items(messages.asReversed(), key = { it.id }) { message ->
-                    MessageBubble(message)
+                    MessageBubble(
+                        message = message,
+                        attachmentRevision = attachmentRevision,
+                        onAttachment = { descriptor ->
+                            if (!descriptor.incoming) {
+                                Toast.makeText(
+                                    context,
+                                    "Encrypted payload is waiting on this device",
+                                    Toast.LENGTH_SHORT,
+                                ).show()
+                            } else {
+                                attachmentBusy = true
+                                coroutineScope.launch {
+                                    val result = withContext(Dispatchers.IO) {
+                                        SecureAttachmentRepository.downloadIncoming(
+                                            context,
+                                            conversation.smsAddress.orEmpty(),
+                                            descriptor,
+                                        )
+                                    }
+                                    attachmentBusy = false
+                                    result.onSuccess {
+                                        attachmentRevision++
+                                        SecureAttachmentRepository.openDownloaded(context, descriptor)
+                                            .onFailure { openError ->
+                                                Toast.makeText(
+                                                    context,
+                                                    "Downloaded, but no app could open it: ${openError.message}",
+                                                    Toast.LENGTH_LONG,
+                                                ).show()
+                                            }
+                                    }.onFailure { error ->
+                                        Toast.makeText(
+                                            context,
+                                            "Direct Wi-Fi download failed: ${error.message}",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
+                                }
+                            }
+                        },
+                    )
                 }
                 item {
                     Text(
                         if (secureLane) {
-                            "VESSEL CHANNEL // END-TO-END ENCRYPTED CAPSULES OVER SMS"
+                            "VESSEL CHANNEL // ENCRYPTED TEXT OVER SMS // ENCRYPTED FILES OVER DIRECT WIFI"
                         } else if (isRealSms) {
-                            "ANDROID TELEPHONY // ORDINARY CARRIER SMS"
+                            "ANDROID TELEPHONY // ORDINARY CARRIER SMS + MMS // NOT ENCRYPTED"
                         } else {
                             "SECURE CHANNEL // VISUAL PROTOCOL PREVIEW"
                         },
@@ -1197,7 +1323,12 @@ private fun ConversationHeader(
 }
 
 @Composable
-private fun MessageBubble(message: DemoMessage) {
+private fun MessageBubble(
+    message: DemoMessage,
+    attachmentRevision: Int,
+    onAttachment: (SecureAttachmentDescriptor) -> Unit,
+) {
+    val context = LocalContext.current
     val lightTheme = LocalLightTheme.current
     val accent = if (message.outgoing) {
         if (message.transport == Transport.SECURE) Violet else Amber
@@ -1233,6 +1364,52 @@ private fun MessageBubble(message: DemoMessage) {
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
             Text(message.text, color = Mist, fontSize = 15.sp, lineHeight = 20.sp)
+            message.attachment?.let { attachment ->
+                val downloaded = remember(attachment.id, attachmentRevision) {
+                    SecureAttachmentRepository.downloadedCiphertext(context, attachment.id) != null
+                }
+                Button(
+                    onClick = { onAttachment(attachment) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Violet.copy(alpha = 0.2f),
+                        contentColor = Violet,
+                    ),
+                    modifier = Modifier.padding(top = 9.dp),
+                ) {
+                    Text(
+                        when {
+                            !attachment.incoming -> "ENCRYPTED // WIFI READY"
+                            downloaded -> "OPEN VERIFIED FILE"
+                            else -> "DOWNLOAD OVER DIRECT WIFI"
+                        },
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                    )
+                }
+            }
+            message.carrierMmsAttachment?.let { attachment ->
+                Button(
+                    onClick = {
+                        runCatching {
+                            context.startActivity(
+                                Intent(Intent.ACTION_VIEW).apply {
+                                    setDataAndType(attachment.uri, attachment.mimeType)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                },
+                            )
+                        }.onFailure {
+                            Toast.makeText(context, "No app could open this MMS image", Toast.LENGTH_LONG).show()
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Amber.copy(alpha = 0.2f),
+                        contentColor = Amber,
+                    ),
+                    modifier = Modifier.padding(top = 9.dp),
+                ) {
+                    Text("OPEN MMS IMAGE // CARRIER", fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                }
+            }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(top = 5.dp),
                 horizontalArrangement = Arrangement.End,
@@ -1241,7 +1418,13 @@ private fun MessageBubble(message: DemoMessage) {
                 Text(
                     buildString {
                         append(if (message.outgoing) "YOU" else "THEM")
-                        append(if (message.transport == Transport.SECURE) " // ECHO" else " // CELL")
+                        append(
+                            when {
+                                message.transport == Transport.SECURE -> " // ECHO"
+                                message.carrierMmsAttachment != null -> " // MMS // CARRIER"
+                                else -> " // CELL"
+                            },
+                        )
                     },
                     color = accent.copy(alpha = 0.75f),
                     fontFamily = FontFamily.Monospace,
@@ -1471,6 +1654,9 @@ private fun Composer(
     onTransportChange: (Transport) -> Unit,
     secureOnly: Boolean,
     enabled: Boolean,
+    attachmentBusy: Boolean,
+    attachmentEnabled: Boolean,
+    onAttachment: () -> Unit,
     onSend: () -> Unit,
 ) {
     val accent = if (transport == Transport.SECURE) Violet else Amber
@@ -1513,7 +1699,7 @@ private fun Composer(
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = {}, enabled = enabled) {
+            IconButton(onClick = onAttachment, enabled = enabled && !attachmentBusy && attachmentEnabled) {
                 Icon(Icons.Default.Add, contentDescription = "Attachment", tint = accent)
             }
             OutlinedTextField(
@@ -1525,7 +1711,7 @@ private fun Composer(
                         when {
                             secureOnly && !enabled -> "Verify vessel to emit secure pings…"
                             secureOnly -> "Emit secure ping…"
-                            else -> "Send ordinary SMS…"
+                            else -> "Send SMS or add an MMS image…"
                         },
                         color = Muted,
                     )
@@ -1575,7 +1761,7 @@ private fun VesselsScreen(
                 threadId = thread.threadId,
                 address = thread.address,
             ).mapNotNull { message ->
-                val decoded = SecureRepository.decodeForDisplay(
+                val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
                     context = context,
                     address = thread.address,
                     body = message.body,
@@ -1698,7 +1884,7 @@ private fun SystemScreen(
             when {
                 !isDefaultSmsApp -> "Select EutherPing as Android's default SMS handler to connect the carrier channel."
                 !hasSmsPermissions -> "The SMS role is active. Grant read, receive, send and write access to continue."
-                else -> "Live Android Telephony inbox and SMS transport are connected."
+                else -> "Live Android Telephony SMS and MMS transport is connected."
             },
             actionLabel = if (isDefaultSmsApp) "GRANT ACCESS" else "CONNECT SMS",
             onAction = if (isDefaultSmsApp && hasSmsPermissions) null else onRequestSmsSetup,

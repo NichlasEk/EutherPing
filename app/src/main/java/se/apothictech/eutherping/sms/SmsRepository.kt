@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Telephony
+import android.telephony.PhoneNumberUtils
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
 
@@ -30,6 +31,14 @@ data class SmsEntry(
     val incoming: Boolean,
     val read: Boolean,
     val status: Int,
+    val isMms: Boolean = false,
+    val mmsAttachment: CarrierMmsAttachment? = null,
+)
+
+data class CarrierMmsAttachment(
+    val uri: Uri,
+    val mimeType: String,
+    val name: String,
 )
 
 object SmsRepository {
@@ -100,7 +109,30 @@ object SmsRepository {
                     }
                 }
             }
+            loadMmsEntries(context, threadId = null, address = null).asReversed().forEach { entry ->
+                val mmsThreadId = entry.threadId ?: return@forEach
+                val address = entry.address.ifBlank { "Unknown sender" }
+                val unreadDelta = if (!entry.read) 1 else 0
+                val candidate = SmsThread(
+                    threadId = mmsThreadId,
+                    address = address,
+                    body = entry.body.ifBlank {
+                        if (entry.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
+                    },
+                    timestamp = entry.timestamp,
+                    unread = unreadDelta,
+                    incoming = entry.incoming,
+                )
+                val existing = byThread[mmsThreadId]
+                byThread[mmsThreadId] = if (existing == null) {
+                    candidate
+                } else {
+                    (if (candidate.timestamp > existing.timestamp) candidate else existing)
+                        .copy(unread = existing.unread + unreadDelta)
+                }
+            }
             byThread.values.toList()
+                .sortedByDescending(SmsThread::timestamp)
         }.getOrDefault(emptyList())
     }
 
@@ -152,8 +184,146 @@ object SmsRepository {
                         )
                     }
                 }
-            }
+                loadMmsEntries(context, threadId, address).forEach { mms ->
+                    add(
+                        SmsEntry(
+                            id = -mms.id - 1,
+                            body = mms.body.ifBlank {
+                                if (mms.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
+                            },
+                            timestamp = mms.timestamp,
+                            incoming = mms.incoming,
+                            read = mms.read,
+                            status = mms.messageBox,
+                            isMms = true,
+                            mmsAttachment = mms.attachment,
+                        ),
+                    )
+                }
+            }.sortedBy(SmsEntry::timestamp)
         }.getOrDefault(emptyList())
+    }
+
+    private data class MmsEntry(
+        val id: Long,
+        val threadId: Long?,
+        val address: String,
+        val body: String,
+        val timestamp: Long,
+        val incoming: Boolean,
+        val read: Boolean,
+        val messageBox: Int,
+        val attachment: CarrierMmsAttachment?,
+    )
+
+    private fun loadMmsEntries(
+        context: Context,
+        threadId: Long?,
+        address: String?,
+    ): List<MmsEntry> = runCatching {
+        buildList {
+            val projection = arrayOf(
+                Telephony.Mms._ID,
+                Telephony.Mms.THREAD_ID,
+                Telephony.Mms.DATE,
+                Telephony.Mms.MESSAGE_BOX,
+                Telephony.Mms.READ,
+                Telephony.Mms.SUBJECT,
+            )
+            context.contentResolver.query(
+                Telephony.Mms.CONTENT_URI,
+                projection,
+                threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" },
+                threadId?.let { arrayOf(it.toString()) },
+                "${Telephony.Mms.DATE} ASC",
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow(Telephony.Mms._ID)
+                val threadIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.THREAD_ID)
+                val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.DATE)
+                val boxIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
+                val readIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.READ)
+                val subjectIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.SUBJECT)
+                while (cursor.moveToNext()) {
+                    val id = cursor.getLong(idIndex)
+                    val box = cursor.getInt(boxIndex)
+                    val incoming = box == Telephony.Mms.MESSAGE_BOX_INBOX
+                    val mmsAddress = mmsAddress(context, id, incoming)
+                    if (address != null && !PhoneNumberUtils.compare(address, mmsAddress)) continue
+                    val parts = mmsParts(context, id)
+                    val subject = cursor.getString(subjectIndex).orEmpty().trim()
+                    add(
+                        MmsEntry(
+                            id = id,
+                            threadId = cursor.getLong(threadIndex).takeIf { it > 0 },
+                            address = mmsAddress,
+                            body = parts.first.ifBlank { subject },
+                            timestamp = cursor.getLong(dateIndex) * 1000L,
+                            incoming = incoming,
+                            read = cursor.getInt(readIndex) != 0,
+                            messageBox = box,
+                            attachment = parts.second,
+                        ),
+                    )
+                }
+            }
+        }
+    }.getOrDefault(emptyList())
+
+    private fun mmsAddress(context: Context, id: Long, incoming: Boolean): String = runCatching {
+        val preferredType = if (incoming) 137 else 151
+        var fallback = ""
+        context.contentResolver.query(
+            Uri.parse("content://mms/$id/addr"),
+            arrayOf("address", "type"),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val addressIndex = cursor.getColumnIndexOrThrow("address")
+            val typeIndex = cursor.getColumnIndexOrThrow("type")
+            while (cursor.moveToNext()) {
+                val value = cursor.getString(addressIndex).orEmpty()
+                if (value.isBlank() || value == "insert-address-token") continue
+                if (fallback.isBlank()) fallback = value
+                if (cursor.getInt(typeIndex) == preferredType) return@runCatching value
+            }
+        }
+        fallback
+    }.getOrDefault("")
+
+    private fun mmsParts(context: Context, id: Long): Pair<String, CarrierMmsAttachment?> {
+        var text = ""
+        var attachment: CarrierMmsAttachment? = null
+        runCatching {
+            context.contentResolver.query(
+                Uri.parse("content://mms/part"),
+                arrayOf("_id", "ct", "text", "name", "fn", "cl"),
+                "mid = ?",
+                arrayOf(id.toString()),
+                null,
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow("_id")
+                val typeIndex = cursor.getColumnIndexOrThrow("ct")
+                val textIndex = cursor.getColumnIndexOrThrow("text")
+                val nameIndexes = listOf("name", "fn", "cl").map(cursor::getColumnIndex)
+                while (cursor.moveToNext()) {
+                    val mime = cursor.getString(typeIndex).orEmpty()
+                    if (mime == "text/plain") {
+                        text = cursor.getString(textIndex).orEmpty()
+                    } else if (attachment == null && mime.startsWith("image/")) {
+                        val name = nameIndexes.firstNotNullOfOrNull { index ->
+                            if (index >= 0) cursor.getString(index)?.takeIf(String::isNotBlank) else null
+                        } ?: "carrier-mms-image"
+                        attachment = CarrierMmsAttachment(
+                            uri = Uri.parse("content://mms/part/${cursor.getLong(idIndex)}"),
+                            mimeType = mime,
+                            name = name,
+                        )
+                    }
+                }
+            }
+        }
+        return text to attachment
     }
 
     fun markThreadRead(context: Context, threadId: Long?) {
@@ -167,6 +337,12 @@ object SmsRepository {
                 Telephony.Sms.CONTENT_URI,
                 values,
                 "${Telephony.Sms.THREAD_ID} = ?",
+                arrayOf(threadId.toString()),
+            )
+            context.contentResolver.update(
+                Telephony.Mms.CONTENT_URI,
+                values,
+                "${Telephony.Mms.THREAD_ID} = ?",
                 arrayOf(threadId.toString()),
             )
         }

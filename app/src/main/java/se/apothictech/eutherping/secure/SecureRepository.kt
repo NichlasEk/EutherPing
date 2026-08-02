@@ -59,12 +59,28 @@ data class SecureDecodedMessage(
     val text: String,
     val isSecure: Boolean,
     val verified: Boolean,
+    val attachment: SecureAttachmentDescriptor? = null,
+)
+
+data class SecureAttachmentDescriptor(
+    val id: String,
+    val name: String,
+    val mimeType: String,
+    val plaintextSize: Long,
+    val plaintextSha256: String,
+    val ciphertextSize: Long,
+    val ciphertextSha256: String,
+    val contentKey: ByteArray,
+    val nonce: ByteArray,
+    val downloadUrl: String,
+    val incoming: Boolean,
 )
 
 object SecureRepository {
     const val INVITE_PREFIX = "EP2I:"
     const val ACCEPT_PREFIX = "EP2A:"
     const val MESSAGE_PREFIX = "EP1M:"
+    const val ATTACHMENT_PREFIX = "EP1F:"
 
     private const val LEGACY_INVITE_PREFIX = "EP1I:"
     private const val LEGACY_ACCEPT_PREFIX = "EP1A:"
@@ -75,7 +91,8 @@ object SecureRepository {
         body.startsWith(ACCEPT_PREFIX) ||
         body.startsWith(LEGACY_INVITE_PREFIX) ||
         body.startsWith(LEGACY_ACCEPT_PREFIX) ||
-        body.startsWith(MESSAGE_PREFIX)
+        body.startsWith(MESSAGE_PREFIX) ||
+        body.startsWith(ATTACHMENT_PREFIX)
 
     private const val KEYSET_PREFS = "eutherping_secure_keysets"
     private const val PEER_PREFS = "eutherping_secure_peers"
@@ -95,6 +112,24 @@ object SecureRepository {
     }
 
     fun localFingerprint(context: Context): String = identity(context).fingerprint
+
+    fun signAttachmentRequest(context: Context, id: String, token: String): String {
+        val canonical = "GET|$id|$token".toByteArray(UTF_8)
+        return encode(signingKeyset(context).getPrimitive(PublicKeySign::class.java).sign(canonical))
+    }
+
+    fun verifyAttachmentRequest(
+        signingPublicKey: ByteArray,
+        id: String,
+        token: String,
+        encodedSignature: String,
+    ): Boolean = runCatching {
+        registerCrypto()
+        val canonical = "GET|$id|$token".toByteArray(UTF_8)
+        KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(signingPublicKey))
+            .getPrimitive(PublicKeyVerify::class.java)
+            .verify(decode(encodedSignature), canonical)
+    }.isSuccess
 
     fun peer(context: Context, address: String): SecurePeer {
         val normalized = normalizeAddress(address)
@@ -220,6 +255,54 @@ object SecureRepository {
             .let(::encode)
     }
 
+    fun encryptAttachmentOffer(
+        context: Context,
+        address: String,
+        descriptor: SecureAttachmentDescriptor,
+    ): Result<String> = runCatching {
+        val current = peer(context, address)
+        check(current.canEncrypt) { "Secure Ping is not paired with this contact" }
+        val recipientFingerprint = checkNotNull(current.fingerprint)
+        val senderFingerprint = identity(context).fingerprint
+        val payload = JSONObject()
+            .put("v", 1)
+            .put("kind", "file")
+            .put("id", descriptor.id)
+            .put("ts", System.currentTimeMillis())
+            .put("from", senderFingerprint)
+            .put("to", recipientFingerprint)
+            .put("name", descriptor.name)
+            .put("mime", descriptor.mimeType)
+            .put("ps", descriptor.plaintextSize)
+            .put("ph", descriptor.plaintextSha256)
+            .put("cs", descriptor.ciphertextSize)
+            .put("ch", descriptor.ciphertextSha256)
+            .put("key", encode(descriptor.contentKey))
+            .put("nonce", encode(descriptor.nonce))
+            .put("url", descriptor.downloadUrl)
+            .toString()
+            .toByteArray(UTF_8)
+        val signature = signingKeyset(context).getPrimitive(PublicKeySign::class.java).sign(payload)
+        val signedPayload = JSONObject()
+            .put("p", encode(payload))
+            .put("s", encode(signature))
+            .toString()
+            .toByteArray(UTF_8)
+        val peerPublic = KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(current.encryptionPublicKey))
+        val ciphertext = peerPublic.getPrimitive(HybridEncrypt::class.java).encrypt(
+            signedPayload,
+            contextInfo(recipientFingerprint),
+        )
+        storeOutgoing(context, descriptor.id, String(payload, UTF_8))
+        ATTACHMENT_PREFIX + JSONObject()
+            .put("v", 1)
+            .put("id", descriptor.id)
+            .put("c", encode(ciphertext))
+            .toString()
+            .toByteArray(UTF_8)
+            .let(::encode)
+    }
+
     fun decodeForDisplay(
         context: Context,
         address: String,
@@ -257,6 +340,18 @@ object SecureRepository {
         }.getOrElse {
             invalidSecureCapsule()
         }
+        body.startsWith(ATTACHMENT_PREFIX) -> decodeAttachmentOffer(context, address, body, incoming)
+            .fold(
+                onSuccess = { attachment ->
+                    SecureDecodedMessage(
+                        text = "📎 ${attachment.name} • ${formatAttachmentSize(attachment.plaintextSize)} • DIRECT WIFI",
+                        isSecure = true,
+                        verified = peer(context, address).state == SecurePeerState.VERIFIED,
+                        attachment = attachment,
+                    )
+                },
+                onFailure = { invalidSecureCapsule() },
+            )
         else -> null
     }
 
@@ -286,7 +381,51 @@ object SecureRepository {
                 onSuccess = { "Encrypted Secure Ping received" },
                 onFailure = { "Unverified Secure Ping received" },
             )
+        body.startsWith(ATTACHMENT_PREFIX) -> decodeAttachmentOffer(context, address, body, incoming = true)
+            .fold(
+                onSuccess = { "Encrypted attachment offer received" },
+                onFailure = { "Invalid encrypted attachment offer received" },
+            )
         else -> body
+    }
+
+    fun decodeAttachmentOffer(
+        context: Context,
+        address: String,
+        body: String,
+        incoming: Boolean,
+    ): Result<SecureAttachmentDescriptor> = runCatching {
+        val outer = parseAttachmentOuter(body)
+        val payloadBytes = if (incoming) {
+            val current = peer(context, address)
+            check(current.signingPublicKey != null && current.fingerprint != null) {
+                "Unknown Secure Ping sender"
+            }
+            val signedPayloadBytes = hpkeKeyset(context).getPrimitive(HybridDecrypt::class.java).decrypt(
+                decode(outer.getString("c")),
+                contextInfo(localFingerprint(context)),
+            )
+            val signedPayload = JSONObject(String(signedPayloadBytes, UTF_8))
+            val verifiedPayload = decode(signedPayload.getString("p"))
+            val publicSigning = KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(current.signingPublicKey))
+            publicSigning.getPrimitive(PublicKeyVerify::class.java).verify(
+                decode(signedPayload.getString("s")),
+                verifiedPayload,
+            )
+            val verifiedJson = JSONObject(String(verifiedPayload, UTF_8))
+            check(verifiedJson.getString("from") == current.fingerprint)
+            check(verifiedJson.getString("to") == localFingerprint(context))
+            verifiedPayload
+        } else {
+            val stored = loadOutgoing(context, outer.getString("id"))
+                ?: error("Attachment metadata is unavailable on this installation")
+            stored.toByteArray(UTF_8)
+        }
+        val payload = JSONObject(String(payloadBytes, UTF_8))
+        check(payload.getInt("v") == 1)
+        check(payload.getString("kind") == "file")
+        check(payload.getString("id") == outer.getString("id"))
+        attachmentDescriptor(payload, incoming)
     }
 
     fun safetyNumber(context: Context, address: String): String? {
@@ -333,6 +472,54 @@ object SecureRepository {
         val outer = JSONObject(String(decode(body.removePrefix(MESSAGE_PREFIX)), UTF_8))
         require(outer.getInt("v") == 1)
         return outer
+    }
+
+    private fun parseAttachmentOuter(body: String): JSONObject {
+        require(body.startsWith(ATTACHMENT_PREFIX))
+        val outer = JSONObject(String(decode(body.removePrefix(ATTACHMENT_PREFIX)), UTF_8))
+        require(outer.getInt("v") == 1)
+        require(outer.getString("id").isNotBlank())
+        return outer
+    }
+
+    private fun attachmentDescriptor(payload: JSONObject, incoming: Boolean): SecureAttachmentDescriptor {
+        val id = payload.getString("id")
+        val name = payload.getString("name")
+        val mimeType = payload.getString("mime")
+        val plaintextSize = payload.getLong("ps")
+        val ciphertextSize = payload.getLong("cs")
+        val plaintextHash = payload.getString("ph")
+        val ciphertextHash = payload.getString("ch")
+        val key = decode(payload.getString("key"))
+        val nonce = decode(payload.getString("nonce"))
+        require(id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")))
+        require(name.isNotBlank() && name.length <= 180 && '/' !in name && '\\' !in name)
+        require(mimeType.isNotBlank() && mimeType.length <= 120)
+        require(plaintextSize in 0..268_435_456L)
+        require(ciphertextSize in 16..268_435_472L)
+        require(plaintextHash.matches(Regex("[0-9a-f]{64}")))
+        require(ciphertextHash.matches(Regex("[0-9a-f]{64}")))
+        require(key.size == 32)
+        require(nonce.size == 12)
+        return SecureAttachmentDescriptor(
+            id = id,
+            name = name,
+            mimeType = mimeType,
+            plaintextSize = plaintextSize,
+            plaintextSha256 = plaintextHash,
+            ciphertextSize = ciphertextSize,
+            ciphertextSha256 = ciphertextHash,
+            contentKey = key,
+            nonce = nonce,
+            downloadUrl = payload.getString("url"),
+            incoming = incoming,
+        )
+    }
+
+    private fun formatAttachmentSize(bytes: Long): String = when {
+        bytes >= 1_048_576L -> "%.1f MB".format(bytes / 1_048_576.0)
+        bytes >= 1_024L -> "%.1f KB".format(bytes / 1_024.0)
+        else -> "$bytes B"
     }
 
     private fun decodeBundleForDisplay(

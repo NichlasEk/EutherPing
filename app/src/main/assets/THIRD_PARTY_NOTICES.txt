@@ -1,0 +1,11 @@
+EutherPing third-party notices
+
+Android SMS/MMS Sending Library 5.2.6
+Copyright 2017 Jacob Klinker; includes Android Open Source Project-derived MMS PDU code.
+Licensed under the Apache License, Version 2.0.
+
+Klinker Logger 1.0.3
+Copyright Jacob Klinker and contributors.
+Licensed under the Apache License, Version 2.0.
+
+The full Apache License 2.0 text is packaged at assets/licenses/Apache-2.0.txt.

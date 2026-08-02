@@ -2,7 +2,9 @@
 
 ## Current state
 
-EutherPing 0.4.0 does not send or download MMS and does not attach files to Secure Ping messages. Android's MMS entry points are declared only because they are part of the default-SMS role contract. The app also deliberately has no `INTERNET` permission, so direct LAN transfer is not active yet.
+EutherPing 0.6.0 implements encrypted images and files inside verified `Vessels`. A signed, recipient-encrypted `EP1F` offer travels over SMS while the AES-256-GCM ciphertext payload travels directly over the same local Wi-Fi. The sender authenticates the downloader's Vessel signing key, offers expire after 24 hours, and no file transport falls back to plaintext MMS. Files are limited to 256 MB in this beta.
+
+`Signals` also implements a separate carrier image-MMS beta: one selected image plus an optional caption, outgoing PDU persistence and system upload, incoming WAP Push download, provider persistence, and image history. Carrier MMS is explicitly labelled as ordinary and unencrypted. Group MMS, video/audio, manual per-SIM selection, app-level retries, and broad physical carrier testing remain later milestones. Bluetooth transport, automatic secure peer discovery, resumable secure chunks, background foreground-service hosting, and an optional encrypted relay also remain later milestones.
 
 ## Product separation
 
@@ -12,27 +14,29 @@ EutherPing 0.4.0 does not send or download MMS and does not attach files to Secu
 
 ## Secure attachment envelope
 
-Do not invent new cryptographic primitives. Generate a fresh random content key for every attachment, encrypt the file with an established streaming AEAD construction, wrap that content key to the verified vessel's existing public encryption identity, and sign a compact manifest with the sender's existing signing identity. The manifest must bind at least the content hash, ciphertext size, media type, filename policy, sender and recipient fingerprints, message identifier, and protocol version.
+Do not invent new cryptographic primitives. Version 0.6.0 generates a fresh random 256-bit content key and 96-bit nonce for every attachment and streams the file through standard AES-256-GCM. It HPKE-encrypts that key and the complete signed manifest to the verified Vessel identity. The manifest binds ciphertext and plaintext hashes and sizes, media type, safe filename, sender and recipient fingerprints, message identifier, endpoint, and protocol version.
 
-The receiver must verify the signed manifest and recipient identity before accepting bytes, stream ciphertext into private app storage, authenticate the complete file before exposing it, and delete partial or failed transfers. Plain filenames, thumbnails, and media metadata must not be sent outside the encrypted envelope.
+The receiver verifies the signed manifest and recipient identity before accepting bytes, signs the direct request with its Vessel key, streams ciphertext into private app storage, authenticates the complete file before exposing it, and deletes partial or failed transfers. Plain filenames, thumbnails, keys, hashes, and media metadata are not sent outside the HPKE-encrypted envelope. Opening a verified download creates a temporary private cache copy for Android's selected viewer; it is cleared on the next app start and scheduled for deletion after ten minutes.
 
 This is still product protocol work and requires review, test vectors, malformed-input tests, size limits, replay handling, cancellation, storage-pressure behavior, and key-change behavior before a security claim is made.
 
 ## Transport order
 
-1. If both verified vessels explicitly enable local transfer and are reachable on the same Wi-Fi, transfer the encrypted envelope directly over the LAN.
-2. If local transfer is unavailable, keep the attachment queued and explain why. Do not silently fall back to plaintext MMS.
+1. If both verified vessels are reachable on the same Wi-Fi, transfer the encrypted payload directly over the LAN.
+2. If local transfer is unavailable, keep the offer visible and explain the failure. Do not silently fall back to plaintext MMS.
 3. A future opt-in relay may carry the same encrypted envelope without access to its plaintext.
 4. Carrier MMS can be offered separately under `Signals`, but is never presented as Secure Ping.
 
 ## Direct Wi-Fi discovery and authentication
 
-Local discovery should use Android's supported network-service discovery APIs and advertise only an ephemeral service identifier. A phone number, contact name, stable fingerprint, or filename must not be broadcast on the LAN. Discovery merely finds a route; authorization still requires an already verified Vessel identity.
+Version 0.6.0 carries a tokenized local endpoint inside the recipient-encrypted offer and does not broadcast a phone number, contact name, stable fingerprint, or filename on the LAN. Future discovery should use Android's supported network-service discovery APIs and advertise only an ephemeral service identifier. Discovery merely finds a route; authorization still requires an already verified Vessel identity.
 
-The direct connection must mutually authenticate against the verified EutherPing identities and transfer only the already encrypted envelope. Pairing, identity changes, and safety-code verification remain SMS-backed in the first implementation. Direct Wi-Fi must not create a second implicit trust system.
+The sender authorizes a download only after verifying a request signed by the intended recipient's Vessel key. The receiver authenticates the content through the sender-signed manifest plus the exact ciphertext hash and AEAD tag; the local HTTP socket itself is not TLS. Pairing, identity changes, and safety-code verification remain SMS-backed. Direct Wi-Fi does not create a second implicit trust system.
 
-Adding local networking requires an explicit privacy review and the minimum Android network permissions needed for supported OS versions. The UI must clearly show `DIRECT WIFI`, `QUEUED`, `RELAY`, or `FAILED`; it must never claim that a carrier MMS was a secure direct transfer.
+Local networking uses only Android's internet/network/Wi-Fi-state permissions and has no remote backend. The UI identifies `DIRECT WIFI`; it never claims that a carrier MMS was a secure direct transfer.
 
-## Carrier MMS milestone
+## Carrier MMS beta
 
-Real default-SMS-app MMS support requires carrier configuration/APN handling, WAP push parsing, PDU persistence, downloads, uploads, attachments, retries, roaming and data-policy behavior, multi-SIM selection, and extensive device/carrier testing. It should be implemented independently from Secure Ping attachments so neither feature becomes a fallback that weakens the other.
+Version 0.6.0 uses the platform `SmsManager` for carrier/APN transport, composes standards-based PDU data, scales images to the carrier-reported size limit, persists outgoing and incoming MMS through Android's Telephony provider, and uses the WAP Push delivery path required of a default SMS handler. It selects the subscription supplied by an incoming push and otherwise uses Android's default SMS subscription.
+
+The implementation is intentionally independent from Secure Ping attachments so neither feature becomes a fallback that weakens the other. Its PDU/provider path is covered on Android 11 emulators, but an emulator has no real MMSC. Before calling carrier MMS production-ready, test send, receive, failure, retry, roaming, mobile-data-off, Wi-Fi-calling, and multi-SIM behavior on every intended physical phone/carrier combination.
