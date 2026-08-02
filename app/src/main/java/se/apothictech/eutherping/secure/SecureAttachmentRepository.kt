@@ -1,7 +1,9 @@
 package se.apothictech.eutherping.secure
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -10,6 +12,7 @@ import android.provider.OpenableColumns
 import android.os.Handler
 import android.os.Looper
 import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -65,6 +68,13 @@ object SecureAttachmentRepository {
 
     fun prepareOutgoing(context: Context, address: String, uri: Uri): Result<PreparedSecureAttachment> =
         runCatching {
+            check(
+                ContextCompat.checkSelfPermission(context, Manifest.permission.INTERNET) ==
+                    PackageManager.PERMISSION_GRANTED,
+            ) {
+                "Local network access is blocked. On GrapheneOS, open Settings → Apps → EutherPing → " +
+                    "Permissions and enable Network, then keep both phones on the same Wi-Fi."
+            }
             val peer = SecureRepository.peer(context, address)
             check(peer.canEncrypt) {
                 "Verify the vessel before sending a file"
@@ -145,7 +155,26 @@ object SecureAttachmentRepository {
                     throw error
                 }
             PreparedSecureAttachment(wireBody, descriptor)
+        }.recoverCatching { error -> throw explainAttachmentFailure(error) }
+
+    internal fun explainAttachmentFailure(error: Throwable): Throwable {
+        val networkDenied = generateSequence(error) { it.cause }.any { cause ->
+            (cause is SocketException || cause.javaClass.name == "android.system.ErrnoException") &&
+                cause.message.orEmpty().let { message ->
+                    message.contains("EPERM", ignoreCase = true) ||
+                        message.contains("Operation not permitted", ignoreCase = true)
+                }
         }
+        return if (networkDenied) {
+            IllegalStateException(
+                "Local network access is blocked. On GrapheneOS, open Settings → Apps → EutherPing → " +
+                    "Permissions and enable Network, then keep both phones on the same Wi-Fi.",
+                error,
+            )
+        } else {
+            error
+        }
+    }
 
     fun downloadIncoming(
         context: Context,

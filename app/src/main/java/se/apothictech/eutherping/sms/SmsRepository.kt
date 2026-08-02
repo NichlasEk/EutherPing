@@ -160,13 +160,15 @@ object SmsRepository {
             Telephony.Sms.TYPE,
             Telephony.Sms.STATUS,
         )
-        context.contentResolver.query(
-            Telephony.Sms.CONTENT_URI,
-            projection,
-            null,
-            null,
-            "${Telephony.Sms.DATE} ASC",
-        )?.use { cursor ->
+        checkNotNull(
+            context.contentResolver.query(
+                Telephony.Sms.CONTENT_URI,
+                projection,
+                null,
+                null,
+                "${Telephony.Sms.DATE} ASC",
+            ),
+        ) { "Android's SMS provider returned no message cursor" }.use { cursor ->
             val idIndex = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
             val threadIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
             val addressIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)

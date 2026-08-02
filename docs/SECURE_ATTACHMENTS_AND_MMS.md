@@ -2,7 +2,7 @@
 
 ## Current state
 
-EutherPing 0.6.3 implements encrypted images and files inside verified `Vessels`. A signed, recipient-encrypted `EP1F` offer travels over SMS while the AES-256-GCM ciphertext payload travels directly over the same local Wi-Fi. The sender authenticates the downloader's Vessel signing key, offers expire after 24 hours, and no file transport falls back to plaintext MMS. Files are limited to 256 MB in this beta.
+EutherPing 0.6.4 implements encrypted images and files inside verified `Vessels`. A signed, recipient-encrypted `EP1F` offer travels over SMS while the AES-256-GCM ciphertext payload travels directly over the same local Wi-Fi. The sender authenticates the downloader's Vessel signing key, offers expire after 24 hours, and no file transport falls back to plaintext MMS. Files are limited to 256 MB in this beta. GrapheneOS users must leave the app-specific Network toggle enabled for the direct local socket; a denied socket is reported with an actionable settings explanation.
 
 `Signals` also implements a separate carrier image-MMS beta: one selected image plus an optional caption, outgoing PDU persistence and system upload, incoming WAP Push download, provider persistence, and image history. Carrier MMS is explicitly labelled as ordinary and unencrypted. Group MMS, video/audio, manual per-SIM selection, app-level retries, and broad physical carrier testing remain later milestones. Bluetooth transport, automatic secure peer discovery, resumable secure chunks, background foreground-service hosting, and an optional encrypted relay also remain later milestones.
 
@@ -14,7 +14,7 @@ EutherPing 0.6.3 implements encrypted images and files inside verified `Vessels`
 
 ## Secure attachment envelope
 
-Do not invent new cryptographic primitives. Version 0.6.3 generates a fresh random 256-bit content key and 96-bit nonce for every attachment and streams the file through standard AES-256-GCM. It HPKE-encrypts that key and the complete signed manifest to the verified Vessel identity. The manifest binds ciphertext and plaintext hashes and sizes, media type, safe filename, sender and recipient fingerprints, message identifier, endpoint, and protocol version.
+Do not invent new cryptographic primitives. Version 0.6.4 generates a fresh random 256-bit content key and 96-bit nonce for every attachment and streams the file through standard AES-256-GCM. It HPKE-encrypts that key and the complete signed manifest to the verified Vessel identity. The manifest binds ciphertext and plaintext hashes and sizes, media type, safe filename, sender and recipient fingerprints, message identifier, endpoint, and protocol version.
 
 The receiver verifies the signed manifest and recipient identity before accepting bytes, signs the direct request with its Vessel key, streams ciphertext into private app storage, authenticates the complete file before exposing it, and deletes partial or failed transfers. Plain filenames, thumbnails, keys, hashes, and media metadata are not sent outside the HPKE-encrypted envelope. Opening a verified download creates a temporary private cache copy for Android's selected viewer; it is cleared on the next app start and scheduled for deletion after ten minutes.
 
@@ -29,7 +29,7 @@ This is still product protocol work and requires review, test vectors, malformed
 
 ## Direct Wi-Fi discovery and authentication
 
-Version 0.6.3 carries a tokenized local endpoint inside the recipient-encrypted offer and does not broadcast a phone number, contact name, stable fingerprint, or filename on the LAN. Future discovery should use Android's supported network-service discovery APIs and advertise only an ephemeral service identifier. Discovery merely finds a route; authorization still requires an already verified Vessel identity.
+Version 0.6.4 carries a tokenized local endpoint inside the recipient-encrypted offer and does not broadcast a phone number, contact name, stable fingerprint, or filename on the LAN. Future discovery should use Android's supported network-service discovery APIs and advertise only an ephemeral service identifier. Discovery merely finds a route; authorization still requires an already verified Vessel identity.
 
 The sender authorizes a download only after verifying a request signed by the intended recipient's Vessel key. The receiver authenticates the content through the sender-signed manifest plus the exact ciphertext hash and AEAD tag; the local HTTP socket itself is not TLS. Pairing, identity changes, and safety-code verification remain SMS-backed. Direct Wi-Fi does not create a second implicit trust system.
 
@@ -37,6 +37,6 @@ Local networking uses only Android's internet/network/Wi-Fi-state permissions an
 
 ## Carrier MMS beta
 
-Version 0.6.3 uses the platform `SmsManager` for carrier/APN transport, composes standards-based PDU data, scales images to the carrier-reported size limit, persists outgoing and incoming MMS through Android's Telephony provider, and uses the WAP Push delivery path required of a default SMS handler. It selects the subscription supplied by an incoming push and otherwise uses Android's default SMS subscription. Stored carrier images are decoded into bounded inline previews, and opening one uses an app-controlled temporary copy so external viewers work even when the Telephony provider does not delegate its own URI.
+Version 0.6.4 uses the platform `SmsManager` for carrier/APN transport, composes standards-based PDU data, scales images to the carrier-reported size limit, persists outgoing and incoming MMS through Android's Telephony provider, and uses the WAP Push delivery path required of a default SMS handler. It selects the subscription supplied by an incoming push and otherwise uses Android's default SMS subscription. Stored carrier images are decoded into bounded inline previews, and opening one uses an app-controlled temporary copy so external viewers work even when the Telephony provider does not delegate its own URI.
 
 The implementation is intentionally independent from Secure Ping attachments so neither feature becomes a fallback that weakens the other. Its PDU/provider path is covered on Android 11 emulators, but an emulator has no real MMSC. Before calling carrier MMS production-ready, test send, receive, failure, retry, roaming, mobile-data-off, Wi-Fi-calling, and multi-SIM behavior on every intended physical phone/carrier combination.

@@ -131,6 +131,9 @@ import se.apothictech.eutherping.secure.SecureAttachmentRepository
 import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.sms.CarrierMmsAttachment
 import se.apothictech.eutherping.sms.CarrierMmsRepository
+import se.apothictech.eutherping.sms.CachedConversation
+import se.apothictech.eutherping.sms.CachedConversationIndex
+import se.apothictech.eutherping.sms.ConversationIndexCache
 import se.apothictech.eutherping.sms.SmsRepository
 import se.apothictech.eutherping.sms.SmsConversationSnapshot
 import kotlinx.coroutines.Dispatchers
@@ -229,10 +232,51 @@ private fun applyContactNames(history: DeckHistory, contacts: List<PhoneContact>
     )
 }
 
+private fun Conversation.cached() = CachedConversation(
+    id = id,
+    name = name,
+    initials = initials,
+    preview = preview,
+    time = time,
+    lane = transport.name,
+    unread = unread,
+    distance = distance,
+    smsAddress = smsAddress.orEmpty(),
+    threadId = threadId,
+)
+
+private fun CachedConversation.live(): Conversation? {
+    val transport = runCatching { Transport.valueOf(lane) }.getOrNull() ?: return null
+    if (smsAddress.isBlank()) return null
+    return Conversation(
+        id = id,
+        name = name,
+        initials = initials,
+        preview = preview,
+        time = time,
+        transport = transport,
+        unread = unread,
+        distance = distance,
+        smsAddress = smsAddress,
+        threadId = threadId,
+    )
+}
+
+private fun DeckHistory.cached() = CachedConversationIndex(
+    signals = signals.map(Conversation::cached),
+    vessels = vessels.map(Conversation::cached),
+    updatedAt = System.currentTimeMillis(),
+)
+
+private fun CachedConversationIndex.live() = DeckHistory(
+    signals = signals.mapNotNull(CachedConversation::live),
+    vessels = vessels.mapNotNull(CachedConversation::live),
+    loading = true,
+)
+
 private fun buildDeckHistory(
     context: android.content.Context,
     snapshots: List<SmsConversationSnapshot>,
-    phoneContacts: List<PhoneContact>,
 ): DeckHistory {
     val signals = mutableListOf<Conversation>()
     val vessels = mutableListOf<Conversation>()
@@ -253,12 +297,11 @@ private fun buildDeckHistory(
                 ordinaryMessages += message
             }
         }
-        val contactName = ContactRepository.displayName(phoneContacts, thread.address)
         ordinaryMessages.lastOrNull()?.let { latest ->
             signals += Conversation(
                 id = (100_000L + thread.threadId).toInt(),
-                name = contactName ?: thread.address,
-                initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
+                name = thread.address,
+                initials = addressInitials(thread.address),
                 preview = latest.body,
                 time = formatMessageTime(latest.timestamp),
                 transport = Transport.SMS,
@@ -273,8 +316,8 @@ private fun buildDeckHistory(
             val latest = secureMessages.lastOrNull()
             vessels += Conversation(
                 id = (200_000L + thread.threadId).toInt(),
-                name = contactName ?: thread.address,
-                initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
+                name = thread.address,
+                initials = addressInitials(thread.address),
                 preview = latest?.second?.text ?: securePeerPreview(peer.state),
                 time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
                 transport = Transport.SECURE,
@@ -490,14 +533,20 @@ private fun rememberSmsRevision(enabled: Boolean): Int {
     var revision by remember { mutableIntStateOf(0) }
     DisposableEffect(context, enabled) {
         if (!enabled) return@DisposableEffect onDispose { }
-        val observer = object : ContentObserver(Handler(Looper.getMainLooper())) {
+        val handler = Handler(Looper.getMainLooper())
+        val refresh = Runnable { revision++ }
+        val observer = object : ContentObserver(handler) {
             override fun onChange(selfChange: Boolean) {
-                revision++
+                handler.removeCallbacks(refresh)
+                handler.postDelayed(refresh, 450L)
             }
         }
         context.contentResolver.registerContentObserver(Telephony.Sms.CONTENT_URI, true, observer)
         context.contentResolver.registerContentObserver(Telephony.Mms.CONTENT_URI, true, observer)
-        onDispose { context.contentResolver.unregisterContentObserver(observer) }
+        onDispose {
+            handler.removeCallbacks(refresh)
+            context.contentResolver.unregisterContentObserver(observer)
+        }
     }
     return revision
 }
@@ -587,8 +636,15 @@ private fun SignalDeck(
     val phoneContacts = contactsState.contacts
     var historyRetry by remember { mutableIntStateOf(0) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
+    val initialHistory = remember(realSmsReady) {
+        if (realSmsReady) {
+            ConversationIndexCache.load(context)?.live() ?: DeckHistory(loading = true)
+        } else {
+            DeckHistory()
+        }
+    }
     val unlabelledHistory by produceState(
-        initialValue = DeckHistory(loading = realSmsReady),
+        initialValue = initialHistory,
         realSmsReady,
         smsRevision,
         historyRetry,
@@ -596,12 +652,24 @@ private fun SignalDeck(
         value = if (!realSmsReady) {
             DeckHistory()
         } else {
-            withContext(Dispatchers.IO) {
+            val cached = withContext(Dispatchers.IO) { ConversationIndexCache.load(context) }
+            if (cached != null) value = cached.live()
+            val refreshed = withContext(Dispatchers.IO) {
                 SmsRepository.loadConversationSnapshot(context).fold(
-                    onSuccess = { buildDeckHistory(context, it, emptyList()) },
-                    onFailure = { DeckHistory(error = it.message ?: it.javaClass.simpleName) },
+                    onSuccess = { buildDeckHistory(context, it) },
+                    onFailure = {
+                        if (cached != null) {
+                            cached.live().copy(loading = false, error = it.message ?: it.javaClass.simpleName)
+                        } else {
+                            DeckHistory(error = it.message ?: it.javaClass.simpleName)
+                        }
+                    },
                 )
             }
+            if (refreshed.error == null) {
+                withContext(Dispatchers.IO) { ConversationIndexCache.save(context, refreshed.cached()) }
+            }
+            refreshed
         }
     }
     val history = remember(unlabelledHistory, phoneContacts) {
@@ -726,7 +794,7 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.6.3",
+                "ACOUSTIC MESSAGE TERMINAL 0.6.4",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -784,7 +852,12 @@ private fun SignalsScreen(
             }
             if (historyLoading || historyError != null) {
                 item {
-                    HistoryStatusCard(historyLoading, historyError, onRetryHistory)
+                    HistoryStatusCard(
+                        loading = historyLoading,
+                        error = historyError,
+                        contentAvailable = conversations.isNotEmpty(),
+                        onRetry = onRetryHistory,
+                    )
                 }
             }
         }
@@ -872,7 +945,12 @@ private fun SmsSetupBanner(isDefaultSmsApp: Boolean, onRequestSmsSetup: () -> Un
 }
 
 @Composable
-private fun HistoryStatusCard(loading: Boolean, error: String?, onRetry: () -> Unit) {
+private fun HistoryStatusCard(
+    loading: Boolean,
+    error: String?,
+    contentAvailable: Boolean,
+    onRetry: () -> Unit,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Amber.copy(alpha = 0.1f)),
         border = BorderStroke(1.dp, Amber.copy(alpha = 0.45f)),
@@ -880,7 +958,11 @@ private fun HistoryStatusCard(loading: Boolean, error: String?, onRetry: () -> U
     ) {
         Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
             Text(
-                if (loading) "READING ANDROID MESSAGE ARRAY…" else "MESSAGE ARRAY COULD NOT BE READ",
+                when {
+                    loading && contentAvailable -> "CACHED SIGNALS READY // SYNCING ANDROID MESSAGE ARRAY…"
+                    loading -> "READING ANDROID MESSAGE ARRAY…"
+                    else -> "MESSAGE ARRAY COULD NOT BE READ"
+                },
                 color = Amber,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
@@ -1958,7 +2040,12 @@ private fun VesselsScreen(
             }
         } else if (historyLoading || historyError != null) {
             item {
-                HistoryStatusCard(historyLoading, historyError, onRetryHistory)
+                HistoryStatusCard(
+                    loading = historyLoading,
+                    error = historyError,
+                    contentAvailable = vessels.isNotEmpty(),
+                    onRetry = onRetryHistory,
+                )
             }
         }
         item {
