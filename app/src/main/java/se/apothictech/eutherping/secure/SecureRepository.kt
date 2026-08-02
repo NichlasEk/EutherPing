@@ -71,6 +71,12 @@ object SecureRepository {
     private const val HPKE_PUBLIC_TYPE_URL = "type.googleapis.com/google.crypto.tink.HpkePublicKey"
     private const val ED25519_PUBLIC_TYPE_URL = "type.googleapis.com/google.crypto.tink.Ed25519PublicKey"
 
+    fun isSecureBody(body: String): Boolean = body.startsWith(INVITE_PREFIX) ||
+        body.startsWith(ACCEPT_PREFIX) ||
+        body.startsWith(LEGACY_INVITE_PREFIX) ||
+        body.startsWith(LEGACY_ACCEPT_PREFIX) ||
+        body.startsWith(MESSAGE_PREFIX)
+
     private const val KEYSET_PREFS = "eutherping_secure_keysets"
     private const val PEER_PREFS = "eutherping_secure_peers"
     private const val VAULT_PREFS = "eutherping_secure_vault"

@@ -187,10 +187,12 @@ private data class DemoMessage(
 
 class MainActivity : ComponentActivity() {
     private var requestedAddress by mutableStateOf<String?>(null)
+    private var requestedSecureLane by mutableStateOf(false)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         requestedAddress = intent.smsAddress()
+        requestedSecureLane = intent.getBooleanExtra(EXTRA_SECURE_LANE, false)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
@@ -202,7 +204,11 @@ class MainActivity : ComponentActivity() {
         setContent {
             EutherPingApp(
                 requestedAddress = requestedAddress,
-                onAddressConsumed = { requestedAddress = null },
+                requestedSecureLane = requestedSecureLane,
+                onAddressConsumed = {
+                    requestedAddress = null
+                    requestedSecureLane = false
+                },
             )
         }
     }
@@ -211,14 +217,24 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         requestedAddress = intent.smsAddress()
+        requestedSecureLane = intent.getBooleanExtra(EXTRA_SECURE_LANE, false)
+    }
+
+    companion object {
+        const val EXTRA_SECURE_LANE = "se.apothictech.eutherping.SECURE_LANE"
     }
 }
 
 @Composable
-private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Unit) {
+private fun EutherPingApp(
+    requestedAddress: String?,
+    requestedSecureLane: Boolean,
+    onAddressConsumed: () -> Unit,
+) {
     val context = LocalContext.current
     var appTheme by rememberSaveable { mutableStateOf(loadAppTheme(context)) }
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
+    var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
     var setupRevision by remember { mutableIntStateOf(0) }
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
@@ -253,10 +269,16 @@ private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Un
         }
     }
 
-    LaunchedEffect(requestedAddress) {
+    LaunchedEffect(requestedAddress, requestedSecureLane) {
         val address = requestedAddress?.trim().orEmpty()
         if (address.isNotEmpty()) {
-            activeConversation = cellConversation(address, null)
+            if (requestedSecureLane) {
+                selectedTab = SignalTab.CONTACTS
+                activeConversation = secureConversation(address, null)
+            } else {
+                selectedTab = SignalTab.SIGNALS
+                activeConversation = cellConversation(address, null)
+            }
             onAddressConsumed()
         }
     }
@@ -320,6 +342,8 @@ private fun EutherPingApp(requestedAddress: String?, onAddressConsumed: () -> Un
                 AbyssBackground {
                     if (activeConversation == null) {
                         SignalDeck(
+                            selectedTab = selectedTab,
+                            onSelectedTabChange = { selectedTab = it },
                             isDefaultSmsApp = isDefaultSmsApp,
                             hasSmsPermissions = hasSmsPermissions,
                             smsRevision = smsRevision,
@@ -403,6 +427,8 @@ private fun AbyssBackground(content: @Composable () -> Unit) {
 
 @Composable
 private fun SignalDeck(
+    selectedTab: SignalTab,
+    onSelectedTabChange: (SignalTab) -> Unit,
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
     smsRevision: Int,
@@ -412,7 +438,6 @@ private fun SignalDeck(
     onOpenConversation: (Conversation) -> Unit,
 ) {
     val context = LocalContext.current
-    var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
     var showContactSearch by rememberSaveable { mutableStateOf(false) }
     var contactPermissionRevision by remember { mutableIntStateOf(0) }
     val contactsPermissionLauncher = rememberLauncherForActivityResult(
@@ -440,7 +465,7 @@ private fun SignalDeck(
         if (showContactSearch) {
             showContactSearch = false
         } else {
-            selectedTab = SignalTab.SIGNALS
+            onSelectedTabChange(SignalTab.SIGNALS)
         }
     }
 
@@ -448,7 +473,7 @@ private fun SignalDeck(
         containerColor = Color.Transparent,
         bottomBar = {
             if (!showContactSearch) {
-                DeckNavigation(selectedTab, onSelected = { selectedTab = it })
+                DeckNavigation(selectedTab, onSelected = onSelectedTabChange)
             }
         },
         modifier = Modifier.safeDrawingPadding(),
@@ -461,16 +486,28 @@ private fun SignalDeck(
             if (showContactSearch) {
                 ContactSearchScreen(
                     contacts = phoneContacts,
+                    secureMode = selectedTab == SignalTab.CONTACTS,
                     onBack = { showContactSearch = false },
                     onContactSelected = { contact ->
                         showContactSearch = false
                         onOpenConversation(
-                            cellConversation(contact.phoneNumber, null, contact.name),
+                            if (selectedTab == SignalTab.CONTACTS) {
+                                secureConversation(contact.phoneNumber, null, contact.name)
+                            } else {
+                                cellConversation(contact.phoneNumber, null, contact.name)
+                            },
                         )
                     },
                 )
             } else {
-                DeckHeader(onSearch = ::openContactSearch)
+                DeckHeader(
+                    onSearch = if (selectedTab == SignalTab.SYSTEM) null else ::openContactSearch,
+                    searchDescription = if (selectedTab == SignalTab.CONTACTS) {
+                        "Find a vessel"
+                    } else {
+                        "Search contacts"
+                    },
+                )
                 when (selectedTab) {
                     SignalTab.SIGNALS -> SignalsScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
@@ -480,7 +517,14 @@ private fun SignalDeck(
                         onRequestSmsSetup = onRequestSmsSetup,
                         onOpenConversation = onOpenConversation,
                     )
-                    SignalTab.CONTACTS -> VesselsScreen(onOpenConversation)
+                    SignalTab.CONTACTS -> VesselsScreen(
+                        isDefaultSmsApp = isDefaultSmsApp,
+                        hasSmsPermissions = hasSmsPermissions,
+                        smsRevision = smsRevision,
+                        phoneContacts = phoneContacts,
+                        onRequestSmsSetup = onRequestSmsSetup,
+                        onOpenConversation = onOpenConversation,
+                    )
                     SignalTab.SYSTEM -> SystemScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
                         hasSmsPermissions = hasSmsPermissions,
@@ -495,7 +539,7 @@ private fun SignalDeck(
 }
 
 @Composable
-private fun DeckHeader(onSearch: () -> Unit) {
+private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -521,15 +565,17 @@ private fun DeckHeader(onSearch: () -> Unit) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.3.3",
+                "ACOUSTIC MESSAGE TERMINAL 0.4.0",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
                 letterSpacing = 0.7.sp,
             )
         }
-        IconButton(onClick = onSearch) {
-            Icon(Icons.Default.Search, contentDescription = "Search contacts", tint = Toxic)
+        if (onSearch != null) {
+            IconButton(onClick = onSearch) {
+                Icon(Icons.Default.Search, contentDescription = searchDescription, tint = Toxic)
+            }
         }
         IconButton(onClick = {}) {
             Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Muted)
@@ -551,34 +597,30 @@ private fun SignalsScreen(
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
     val smsConversations = remember(realSmsReady, smsRevision, phoneContacts) {
         if (realSmsReady) {
-            SmsRepository.loadThreads(context).map { thread ->
-                val decoded = SecureRepository.decodeForDisplay(
+            SmsRepository.loadThreads(context).mapNotNull { thread ->
+                val ordinaryMessages = SmsRepository.loadMessages(
                     context = context,
+                    threadId = thread.threadId,
                     address = thread.address,
-                    body = thread.body,
-                    incoming = thread.incoming,
-                )
-                val securePeer = SecureRepository.peer(context, thread.address)
+                ).filter { message ->
+                    SecureRepository.decodeForDisplay(
+                        context = context,
+                        address = thread.address,
+                        body = message.body,
+                        incoming = message.incoming,
+                    ) == null
+                }
+                val latest = ordinaryMessages.lastOrNull() ?: return@mapNotNull null
                 Conversation(
                     id = (100_000L + thread.threadId).toInt(),
                     name = ContactRepository.displayName(phoneContacts, thread.address) ?: thread.address,
                     initials = ContactRepository.displayName(phoneContacts, thread.address)
                         ?.let(::nameInitials) ?: addressInitials(thread.address),
-                    preview = decoded?.text ?: thread.body,
-                    time = formatMessageTime(thread.timestamp),
-                    transport = if (decoded?.isSecure == true || securePeer.state != SecurePeerState.NONE) {
-                        Transport.SECURE
-                    } else {
-                        Transport.SMS
-                    },
-                    unread = thread.unread,
-                    distance = when (securePeer.state) {
-                        SecurePeerState.VERIFIED -> "IDENTITY VERIFIED"
-                        SecurePeerState.ACTIVE_UNVERIFIED -> "KEY UNVERIFIED"
-                        SecurePeerState.INVITE_RECEIVED -> "INVITE RECEIVED"
-                        SecurePeerState.INVITE_SENT -> "AWAITING ECHO"
-                        SecurePeerState.NONE -> "ANDROID TELEPHONY"
-                    },
+                    preview = latest.body,
+                    time = formatMessageTime(latest.timestamp),
+                    transport = Transport.SMS,
+                    unread = ordinaryMessages.count { it.incoming && !it.read },
+                    distance = "ANDROID TELEPHONY",
                     smsAddress = thread.address,
                     threadId = thread.threadId,
                 )
@@ -591,7 +633,7 @@ private fun SignalsScreen(
         if (realSmsReady) {
             smsConversations
         } else {
-            sampleConversations()
+            sampleConversations().filter { it.transport == Transport.SMS }
         }
     }
     LazyColumn(
@@ -617,8 +659,8 @@ private fun SignalsScreen(
         }
         item {
             SonarHero(
-                secureBetaReady = realSmsReady,
-                secureVessels = conversations.count { it.transport == Transport.SECURE },
+                smsReady = realSmsReady,
+                activeSignals = conversations.size,
             )
         }
         item {
@@ -636,8 +678,8 @@ private fun SignalsScreen(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    "${conversations.count { it.transport == Transport.SECURE }} SECURE",
-                    color = Violet,
+                    "${conversations.size} CELL",
+                    color = Amber,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp,
                 )
@@ -762,8 +804,8 @@ private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
 
 @Composable
 private fun SonarHero(
-    secureBetaReady: Boolean,
-    secureVessels: Int,
+    smsReady: Boolean,
+    activeSignals: Int,
 ) {
     val lightTheme = LocalLightTheme.current
     val heroToxic = if (lightTheme) Color(0xFF8BFF62) else Toxic
@@ -808,8 +850,8 @@ private fun SonarHero(
                     )
                 }
                 Text(
-                    if (secureBetaReady) {
-                        "$secureVessels secure ${if (secureVessels == 1) "vessel" else "vessels"} in the log"
+                    if (smsReady) {
+                        "$activeSignals active ${if (activeSignals == 1) "signal" else "signals"} in the log"
                     } else {
                         "Secure Ping is ready to arm"
                     },
@@ -819,8 +861,8 @@ private fun SonarHero(
                     modifier = Modifier.padding(top = 4.dp),
                 )
                 Text(
-                    if (secureBetaReady) {
-                        "Pair by signed SMS, compare the safety code, then emit authenticated encrypted pings."
+                    if (smsReady) {
+                        "Ordinary carrier SMS stays here. Secure identities and encrypted pings live under Vessels."
                     } else {
                         "Enable EutherPing as the SMS app to pair and exchange encrypted SMS capsules."
                     },
@@ -831,7 +873,7 @@ private fun SonarHero(
                 )
             }
             StatusChip(
-                text = if (secureBetaReady) "SECURE BETA" else "ARRAY STANDBY",
+                text = if (smsReady) "CELL ARRAY" else "ARRAY STANDBY",
                 color = heroAmber,
                 modifier = Modifier.align(Alignment.TopEnd).padding(12.dp),
             )
@@ -920,14 +962,15 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var secureRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     val demoMessages = remember(conversation.id) {
         mutableStateListOf(
-            DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", Transport.SECURE),
-            DemoMessage(2, "Barely. The fog is rolling in.", true, "22:05", Transport.SECURE),
-            DemoMessage(3, "Ping me when you reach the north pier.", false, "22:06", Transport.SECURE),
+            DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", conversation.transport),
+            DemoMessage(2, "Barely. The fog is rolling in.", true, "22:05", conversation.transport),
+            DemoMessage(3, "Ping me when you reach the north pier.", false, "22:06", conversation.transport),
         )
     }
     val isRealSms = conversation.smsAddress != null
+    val secureLane = conversation.transport == Transport.SECURE
     val securePeer = remember(conversation.smsAddress, smsRevision, secureRevision) {
-        if (isRealSms) {
+        if (isRealSms && secureLane) {
             SecureRepository.peer(context, conversation.smsAddress.orEmpty())
         } else {
             null
@@ -939,19 +982,20 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 context = context,
                 threadId = conversation.threadId,
                 address = conversation.smsAddress.orEmpty(),
-            ).map { message ->
+            ).mapNotNull { message ->
                 val decoded = SecureRepository.decodeForDisplay(
                     context = context,
                     address = conversation.smsAddress.orEmpty(),
                     body = message.body,
                     incoming = message.incoming,
                 )
+                if (secureLane != (decoded?.isSecure == true)) return@mapNotNull null
                 DemoMessage(
                     id = message.id,
                     text = decoded?.text ?: message.body,
                     outgoing = !message.incoming,
                     time = formatMessageTime(message.timestamp),
-                    transport = if (decoded?.isSecure == true) Transport.SECURE else Transport.SMS,
+                    transport = conversation.transport,
                 )
             }
         } else {
@@ -960,9 +1004,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
     val messages = if (isRealSms) realMessages else demoMessages
     var composerTransport by rememberSaveable(conversation.id) {
-        mutableStateOf(
-            if (isRealSms && securePeer?.canEncrypt == true) conversation.transport else Transport.SMS,
-        )
+        mutableStateOf(conversation.transport)
     }
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
     val focusManager = LocalFocusManager.current
@@ -975,7 +1017,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         val text = draft.trim()
         if (text.isNotEmpty()) {
             if (isRealSms) {
-                val outgoing = if (composerTransport == Transport.SECURE) {
+                val outgoing = if (secureLane) {
                     SecureRepository.encryptMessage(context, conversation.smsAddress.orEmpty(), text)
                 } else {
                     Result.success(text)
@@ -988,7 +1030,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         focusManager.clearFocus()
                         Toast.makeText(
                             context,
-                            if (composerTransport == Transport.SECURE) {
+                            if (secureLane) {
                                 "Encrypted Secure Ping queued"
                             } else {
                                 "SMS queued"
@@ -1023,7 +1065,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 onDraftChange = { draft = it },
                 transport = composerTransport,
                 onTransportChange = { composerTransport = it },
-                allowSecureTransport = isRealSms && securePeer?.canEncrypt == true,
+                secureOnly = secureLane,
+                enabled = !secureLane || securePeer?.canEncrypt == true,
                 onSend = ::sendMessage,
             )
         },
@@ -1042,7 +1085,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom),
             ) {
-                if (isRealSms) {
+                if (isRealSms && secureLane) {
                     item {
                         SecurePairingCard(
                             peerState = securePeer?.state ?: SecurePeerState.NONE,
@@ -1089,12 +1132,14 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 }
                 item {
                     Text(
-                        if (isRealSms) {
-                            "ANDROID TELEPHONY // SECURE BETA USES ENCRYPTED SMS CAPSULES"
+                        if (secureLane) {
+                            "VESSEL CHANNEL // END-TO-END ENCRYPTED CAPSULES OVER SMS"
+                        } else if (isRealSms) {
+                            "ANDROID TELEPHONY // ORDINARY CARRIER SMS"
                         } else {
                             "SECURE CHANNEL // VISUAL PROTOCOL PREVIEW"
                         },
-                        color = if (isRealSms) Amber.copy(alpha = 0.7f) else Violet.copy(alpha = 0.7f),
+                        color = if (secureLane) Violet.copy(alpha = 0.7f) else Amber.copy(alpha = 0.7f),
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp,
                         letterSpacing = 0.7.sp,
@@ -1132,7 +1177,7 @@ private fun ConversationHeader(
                         SecurePeerState.INVITE_RECEIVED -> "SECURE INVITATION RECEIVED"
                         SecurePeerState.INVITE_SENT -> "SECURE INVITATION IN TRANSIT"
                         else -> if (conversation.transport == Transport.SECURE) {
-                            "SECURE PREVIEW // NO LIVE KEYS"
+                            "VESSEL NOT PAIRED"
                         } else {
                             "CELLULAR CONTACT"
                         }
@@ -1217,6 +1262,7 @@ private fun MessageBubble(message: DemoMessage) {
 @Composable
 private fun ContactSearchScreen(
     contacts: List<PhoneContact>,
+    secureMode: Boolean,
     onBack: () -> Unit,
     onContactSelected: (PhoneContact) -> Unit,
 ) {
@@ -1266,8 +1312,12 @@ private fun ContactSearchScreen(
             )
         }
         Text(
-            "PHONEBOOK SONAR // ${filteredContacts.size} CONTACTS",
-            color = Toxic.copy(alpha = 0.72f),
+            if (secureMode) {
+                "VESSEL SONAR // ${filteredContacts.size} CONTACTS // SELECT TO PAIR"
+            } else {
+                "PHONEBOOK SONAR // ${filteredContacts.size} CONTACTS"
+            },
+            color = if (secureMode) Violet else Toxic.copy(alpha = 0.72f),
             fontFamily = FontFamily.Monospace,
             fontSize = 10.sp,
             letterSpacing = 0.8.sp,
@@ -1419,7 +1469,8 @@ private fun Composer(
     onDraftChange: (String) -> Unit,
     transport: Transport,
     onTransportChange: (Transport) -> Unit,
-    allowSecureTransport: Boolean,
+    secureOnly: Boolean,
+    enabled: Boolean,
     onSend: () -> Unit,
 ) {
     val accent = if (transport == Transport.SECURE) Violet else Amber
@@ -1433,15 +1484,24 @@ private fun Composer(
             modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
-            Transport.entries.filter { allowSecureTransport || it == Transport.SMS }.forEach { option ->
+            (if (secureOnly) listOf(Transport.SECURE) else listOf(Transport.SMS)).forEach { option ->
                 val selected = option == transport
                 StatusChip(
                     text = option.label,
                     color = if (option == Transport.SECURE) Violet else Amber,
                     selected = selected,
-                    modifier = Modifier.clickable { onTransportChange(option) },
+                    modifier = Modifier.clickable(enabled = enabled) { onTransportChange(option) },
                 )
             }
+        }
+        AnimatedVisibility(visible = secureOnly && !enabled) {
+            Text(
+                "Complete the vessel handshake and verify the safety code before sending.",
+                color = Violet.copy(alpha = 0.78f),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 9.sp,
+                modifier = Modifier.padding(bottom = 6.dp),
+            )
         }
         AnimatedVisibility(visible = transport == Transport.SMS) {
             Text(
@@ -1453,15 +1513,20 @@ private fun Composer(
             )
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = {}) {
+            IconButton(onClick = {}, enabled = enabled) {
                 Icon(Icons.Default.Add, contentDescription = "Attachment", tint = accent)
             }
             OutlinedTextField(
                 value = draft,
                 onValueChange = onDraftChange,
+                enabled = enabled,
                 placeholder = {
                     Text(
-                        if (transport == Transport.SECURE) "Emit secure ping…" else "Send ordinary SMS…",
+                        when {
+                            secureOnly && !enabled -> "Verify vessel to emit secure pings…"
+                            secureOnly -> "Emit secure ping…"
+                            else -> "Send ordinary SMS…"
+                        },
                         color = Muted,
                     )
                 },
@@ -1479,11 +1544,11 @@ private fun Composer(
                     cursorColor = accent,
                 ),
             )
-            IconButton(onClick = onSend, enabled = draft.isNotBlank()) {
+            IconButton(onClick = onSend, enabled = enabled && draft.isNotBlank()) {
                 Icon(
                     Icons.AutoMirrored.Filled.Send,
                     contentDescription = "Send",
-                    tint = if (draft.isBlank()) Muted.copy(alpha = 0.4f) else accent,
+                    tint = if (!enabled || draft.isBlank()) Muted.copy(alpha = 0.4f) else accent,
                 )
             }
         }
@@ -1491,13 +1556,65 @@ private fun Composer(
 }
 
 @Composable
-private fun VesselsScreen(onOpenConversation: (Conversation) -> Unit) {
-    val vessels = remember { sampleConversations().filter { it.transport == Transport.SECURE } }
+private fun VesselsScreen(
+    isDefaultSmsApp: Boolean,
+    hasSmsPermissions: Boolean,
+    smsRevision: Int,
+    phoneContacts: List<PhoneContact>,
+    onRequestSmsSetup: () -> Unit,
+    onOpenConversation: (Conversation) -> Unit,
+) {
+    val context = LocalContext.current
+    val realSmsReady = isDefaultSmsApp && hasSmsPermissions
+    val vessels = remember(realSmsReady, smsRevision, phoneContacts) {
+        if (!realSmsReady) return@remember emptyList()
+        SmsRepository.loadThreads(context).mapNotNull { thread ->
+            val peer = SecureRepository.peer(context, thread.address)
+            val secureMessages = SmsRepository.loadMessages(
+                context = context,
+                threadId = thread.threadId,
+                address = thread.address,
+            ).mapNotNull { message ->
+                val decoded = SecureRepository.decodeForDisplay(
+                    context = context,
+                    address = thread.address,
+                    body = message.body,
+                    incoming = message.incoming,
+                )
+                if (decoded?.isSecure == true) message to decoded else null
+            }
+            if (peer.state == SecurePeerState.NONE && secureMessages.isEmpty()) {
+                return@mapNotNull null
+            }
+            val latest = secureMessages.lastOrNull()
+            val contactName = ContactRepository.displayName(phoneContacts, thread.address)
+            Conversation(
+                id = (200_000L + thread.threadId).toInt(),
+                name = contactName ?: thread.address,
+                initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
+                preview = latest?.second?.text ?: securePeerPreview(peer.state),
+                time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
+                transport = Transport.SECURE,
+                unread = secureMessages.count { (message) -> message.incoming && !message.read },
+                distance = securePeerLabel(peer.state),
+                smsAddress = thread.address,
+                threadId = thread.threadId,
+            )
+        }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
+        if (!realSmsReady) {
+            item {
+                SmsSetupBanner(
+                    isDefaultSmsApp = isDefaultSmsApp,
+                    onRequestSmsSetup = onRequestSmsSetup,
+                )
+            }
+        }
         item {
             Text(
                 "VESSELS IN RANGE",
@@ -1508,8 +1625,51 @@ private fun VesselsScreen(onOpenConversation: (Conversation) -> Unit) {
                 modifier = Modifier.padding(vertical = 8.dp),
             )
         }
+        item {
+            Text(
+                "Use the search icon above to find a phonebook contact and establish a Secure Ping identity.",
+                color = Muted,
+                fontSize = 12.sp,
+                lineHeight = 17.sp,
+                modifier = Modifier.padding(bottom = 5.dp),
+            )
+        }
+        if (realSmsReady && vessels.isEmpty()) {
+            item {
+                Card(
+                    colors = CardDefaults.cardColors(containerColor = Violet.copy(alpha = 0.08f)),
+                    border = BorderStroke(1.dp, Violet.copy(alpha = 0.35f)),
+                    shape = RoundedCornerShape(16.dp),
+                ) {
+                    Text(
+                        "NO VESSELS YET // SEARCH FOR A CONTACT TO SEND A SECURE INVITE",
+                        color = Violet,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        lineHeight = 17.sp,
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    )
+                }
+            }
+        }
         items(vessels, key = { it.id }) { ConversationRow(it) { onOpenConversation(it) } }
     }
+}
+
+private fun securePeerLabel(state: SecurePeerState): String = when (state) {
+    SecurePeerState.NONE -> "NOT PAIRED"
+    SecurePeerState.INVITE_SENT -> "AWAITING ECHO"
+    SecurePeerState.INVITE_RECEIVED -> "INVITE RECEIVED"
+    SecurePeerState.ACTIVE_UNVERIFIED -> "VERIFY SAFETY CODE"
+    SecurePeerState.VERIFIED -> "IDENTITY VERIFIED"
+}
+
+private fun securePeerPreview(state: SecurePeerState): String = when (state) {
+    SecurePeerState.NONE -> "Ready to establish a secure vessel"
+    SecurePeerState.INVITE_SENT -> "Secure invitation sent"
+    SecurePeerState.INVITE_RECEIVED -> "Secure invitation waiting for acceptance"
+    SecurePeerState.ACTIVE_UNVERIFIED -> "Compare the safety code on both phones"
+    SecurePeerState.VERIFIED -> "Secure Ping channel ready"
 }
 
 @Composable
@@ -1809,6 +1969,22 @@ private fun cellConversation(
     time = "NOW",
     transport = Transport.SMS,
     distance = "ANDROID TELEPHONY",
+    smsAddress = address,
+    threadId = threadId,
+)
+
+private fun secureConversation(
+    address: String,
+    threadId: Long?,
+    contactName: String? = null,
+): Conversation = Conversation(
+    id = threadId?.let { (200_000L + it).toInt() } ?: (address.hashCode() xor 0x40000000),
+    name = contactName ?: address,
+    initials = contactName?.let(::nameInitials) ?: addressInitials(address),
+    preview = "New Secure Ping vessel",
+    time = "NOW",
+    transport = Transport.SECURE,
+    distance = "NOT PAIRED",
     smsAddress = address,
     threadId = threadId,
 )

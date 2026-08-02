@@ -30,10 +30,15 @@ class SmsReceiver : BroadcastReceiver() {
         val timestamp = parts.minOfOrNull { it.timestampMillis } ?: System.currentTimeMillis()
         SecureRepository.handleIncomingControl(context, address, body)
         SmsRepository.persistIncoming(context, address, body, timestamp)
-        showNotification(context, address, SecureRepository.notificationText(context, address, body))
+        showNotification(
+            context = context,
+            address = address,
+            body = SecureRepository.notificationText(context, address, body),
+            secureLane = SecureRepository.isSecureBody(body),
+        )
     }
 
-    private fun showNotification(context: Context, address: String, body: String) {
+    private fun showNotification(context: Context, address: String, body: String, secureLane: Boolean) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
         ) return
@@ -50,6 +55,7 @@ class SmsReceiver : BroadcastReceiver() {
         val openIntent = Intent(context, MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             data = "sms:$address".toUri()
+            putExtra(MainActivity.EXTRA_SECURE_LANE, secureLane)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val pendingIntent = PendingIntent.getActivity(

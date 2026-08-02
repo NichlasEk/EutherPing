@@ -28,6 +28,7 @@ data class SmsEntry(
     val body: String,
     val timestamp: Long,
     val incoming: Boolean,
+    val read: Boolean,
     val status: Int,
 )
 
@@ -110,6 +111,7 @@ object SmsRepository {
             Telephony.Sms.BODY,
             Telephony.Sms.DATE,
             Telephony.Sms.TYPE,
+            Telephony.Sms.READ,
             Telephony.Sms.STATUS,
         )
         val selection: String
@@ -134,6 +136,7 @@ object SmsRepository {
                     val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
                     val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
                     val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+                    val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
                     val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
                     while (cursor.moveToNext()) {
                         val type = cursor.getInt(typeIndex)
@@ -143,6 +146,7 @@ object SmsRepository {
                                 body = cursor.getString(bodyIndex).orEmpty(),
                                 timestamp = cursor.getLong(dateIndex),
                                 incoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX,
+                                read = cursor.getInt(readIndex) != 0,
                                 status = cursor.getInt(statusIndex),
                             ),
                         )
