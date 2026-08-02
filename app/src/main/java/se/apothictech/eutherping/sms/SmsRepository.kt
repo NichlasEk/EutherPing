@@ -203,11 +203,9 @@ object SmsRepository {
                 )
             }
         }
-        loadMmsEntries(context, threadId = null, address = null).forEach { mms ->
+        loadMmsEntries(context, threadId = null, address = null, includeParts = false).forEach { mms ->
             val threadId = mms.threadId ?: return@forEach
-            val body = mms.body.ifBlank {
-                if (mms.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
-            }
+            val body = mms.body.ifBlank { "📷 Carrier MMS" }
             messages.getOrPut(threadId, ::mutableListOf) += SmsEntry(
                 id = -mms.id - 1,
                 body = body,
@@ -326,6 +324,7 @@ object SmsRepository {
         context: Context,
         threadId: Long?,
         address: String?,
+        includeParts: Boolean = true,
     ): List<MmsEntry> = runCatching {
         buildList {
             val projection = arrayOf(
@@ -355,7 +354,7 @@ object SmsRepository {
                     val incoming = box == Telephony.Mms.MESSAGE_BOX_INBOX
                     val mmsAddress = mmsAddress(context, id, incoming)
                     if (address != null && !PhoneNumberUtils.compare(address, mmsAddress)) continue
-                    val parts = mmsParts(context, id)
+                    val parts = if (includeParts) mmsParts(context, id) else "" to null
                     val subject = cursor.getString(subjectIndex).orEmpty().trim()
                     add(
                         MmsEntry(

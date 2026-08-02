@@ -3,6 +3,7 @@ package se.apothictech.eutherping
 import android.Manifest
 import android.app.role.RoleManager
 import android.content.Intent
+import android.graphics.Bitmap
 import android.database.ContentObserver
 import android.net.Uri
 import android.os.Build
@@ -41,6 +42,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -96,11 +98,13 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
@@ -212,6 +216,18 @@ private data class ContactsState(
     val loading: Boolean = false,
     val error: String? = null,
 )
+
+private fun applyContactNames(history: DeckHistory, contacts: List<PhoneContact>): DeckHistory {
+    fun label(conversation: Conversation): Conversation {
+        val address = conversation.smsAddress ?: return conversation
+        val name = ContactRepository.displayName(contacts, address) ?: return conversation
+        return conversation.copy(name = name, initials = nameInitials(name))
+    }
+    return history.copy(
+        signals = history.signals.map(::label),
+        vessels = history.vessels.map(::label),
+    )
+}
 
 private fun buildDeckHistory(
     context: android.content.Context,
@@ -571,11 +587,10 @@ private fun SignalDeck(
     val phoneContacts = contactsState.contacts
     var historyRetry by remember { mutableIntStateOf(0) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
-    val history by produceState(
+    val unlabelledHistory by produceState(
         initialValue = DeckHistory(loading = realSmsReady),
         realSmsReady,
         smsRevision,
-        phoneContacts,
         historyRetry,
     ) {
         value = if (!realSmsReady) {
@@ -583,11 +598,14 @@ private fun SignalDeck(
         } else {
             withContext(Dispatchers.IO) {
                 SmsRepository.loadConversationSnapshot(context).fold(
-                    onSuccess = { buildDeckHistory(context, it, phoneContacts) },
+                    onSuccess = { buildDeckHistory(context, it, emptyList()) },
                     onFailure = { DeckHistory(error = it.message ?: it.javaClass.simpleName) },
                 )
             }
         }
+    }
+    val history = remember(unlabelledHistory, phoneContacts) {
+        applyContactNames(unlabelledHistory, phoneContacts)
     }
 
     fun openContactSearch() {
@@ -708,7 +726,7 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.6.2",
+                "ACOUSTIC MESSAGE TERMINAL 0.6.3",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -1523,17 +1541,47 @@ private fun MessageBubble(
                 }
             }
             message.carrierMmsAttachment?.let { attachment ->
+                val preview by produceState<Bitmap?>(initialValue = null, attachment.uri) {
+                    value = withContext(Dispatchers.IO) {
+                        CarrierMmsRepository.loadPreview(context, attachment).getOrNull()
+                    }
+                }
+                preview?.let { bitmap ->
+                    DisposableEffect(bitmap) {
+                        onDispose { bitmap.recycle() }
+                    }
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Carrier MMS image",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(
+                                (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
+                                    .coerceIn(0.72f, 1.8f),
+                            )
+                            .heightIn(max = 260.dp)
+                            .padding(top = 9.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable {
+                                CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
+                                    Toast.makeText(
+                                        context,
+                                        "Could not open MMS image: ${error.message}",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                            },
+                    )
+                }
                 Button(
                     onClick = {
-                        runCatching {
-                            context.startActivity(
-                                Intent(Intent.ACTION_VIEW).apply {
-                                    setDataAndType(attachment.uri, attachment.mimeType)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                                },
-                            )
-                        }.onFailure {
-                            Toast.makeText(context, "No app could open this MMS image", Toast.LENGTH_LONG).show()
+                        CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
+                            Toast.makeText(
+                                context,
+                                "Could not open MMS image: ${error.message}",
+                                Toast.LENGTH_LONG,
+                            ).show()
                         }
                     },
                     colors = ButtonDefaults.buttonColors(
@@ -1568,7 +1616,7 @@ private fun MessageBubble(
                 )
                 Text(
                     "  ${message.time}",
-                    color = Muted,
+                    color = Mist.copy(alpha = 0.62f),
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp,
                 )
@@ -1834,9 +1882,10 @@ private fun Composer(
         AnimatedVisibility(visible = transport == Transport.SMS) {
             Text(
                 "Carrier charges may apply. Secure messages never fall back silently.",
-                color = Amber.copy(alpha = 0.7f),
+                color = Amber.copy(alpha = 0.84f),
                 fontFamily = FontFamily.Monospace,
-                fontSize = 9.sp,
+                fontSize = 11.sp,
+                lineHeight = 17.sp,
                 modifier = Modifier.padding(bottom = 6.dp),
             )
         }
@@ -2174,6 +2223,15 @@ private fun StatusChip(
 ) {
     Box(
         modifier = modifier
+            .drawBehind {
+                if (selected) {
+                    drawRoundRect(
+                        color = color.copy(alpha = 0.1f),
+                        cornerRadius = CornerRadius(size.height / 2f),
+                        style = Stroke(width = 4.dp.toPx()),
+                    )
+                }
+            }
             .clip(RoundedCornerShape(50))
             .background(color.copy(alpha = if (selected) 0.14f else 0.04f))
             .border(1.dp, color.copy(alpha = if (selected) 0.62f else 0.2f), RoundedCornerShape(50))

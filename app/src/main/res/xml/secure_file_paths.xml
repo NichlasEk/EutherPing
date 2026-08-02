@@ -6,4 +6,7 @@
     <cache-path
         name="mms_transport"
         path="mms_transport/" />
+    <cache-path
+        name="mms_view"
+        path="mms_view/" />
 </paths>

@@ -29,7 +29,49 @@ object CarrierMmsRepository {
     const val ACTION_MMS_SENT = "se.apothictech.eutherping.MMS_SENT"
     const val EXTRA_MMS_URI = "mms_uri"
     private const val MMS_CACHE = "mms_transport"
+    private const val MMS_VIEW_CACHE = "mms_view"
     private const val MAX_SOURCE_BYTES = 25L * 1024 * 1024
+
+    fun loadPreview(context: Context, attachment: CarrierMmsAttachment): Result<Bitmap> = runCatching {
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        checkNotNull(context.contentResolver.openInputStream(attachment.uri)).use {
+            BitmapFactory.decodeStream(it, null, bounds)
+        }
+        check(bounds.outWidth > 0 && bounds.outHeight > 0) { "MMS image could not be decoded" }
+        var sample = 1
+        while (bounds.outWidth / sample > 1200 || bounds.outHeight / sample > 1200) sample *= 2
+        checkNotNull(context.contentResolver.openInputStream(attachment.uri)).use {
+            checkNotNull(
+                BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }),
+            ) { "MMS image could not be decoded" }
+        }
+    }
+
+    fun prepareStoredImage(context: Context, attachment: CarrierMmsAttachment): Result<Uri> = runCatching {
+        val directory = File(context.cacheDir, MMS_VIEW_CACHE).apply { mkdirs() }
+        directory.listFiles()?.forEach(File::delete)
+        val safeName = attachment.name.replace(Regex("[^A-Za-z0-9._-]"), "_").ifBlank { "carrier-mms-image" }
+        val copy = File(directory, safeName)
+        checkNotNull(context.contentResolver.openInputStream(attachment.uri)) {
+            "MMS image is no longer available from Android"
+        }.use { input -> copy.outputStream().use(input::copyTo) }
+        FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.securefiles",
+            copy,
+        )
+    }
+
+    fun openStoredImage(context: Context, attachment: CarrierMmsAttachment): Result<Unit> = runCatching {
+        val contentUri = prepareStoredImage(context, attachment).getOrThrow()
+        context.startActivity(
+            Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(contentUri, attachment.mimeType)
+                clipData = android.content.ClipData.newRawUri("EutherPing carrier MMS", contentUri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+            },
+        )
+    }
 
     fun sendImage(
         context: Context,

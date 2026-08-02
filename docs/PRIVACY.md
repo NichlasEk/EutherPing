@@ -30,7 +30,7 @@ Contacts stay on the device. EutherPing does not upload the address book. Select
 
 ## Collection, sharing, and remote services
 
-EutherPing 0.6.2 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
+EutherPing 0.6.3 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
 
 Direct local encrypted attachment transfer does not send data to an EutherPing backend. The peer receives ciphertext and can decrypt it only with the intended verified Vessel identity.
 
