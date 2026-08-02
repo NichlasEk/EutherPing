@@ -35,6 +35,11 @@ data class SmsEntry(
     val mmsAttachment: CarrierMmsAttachment? = null,
 )
 
+data class SmsConversationSnapshot(
+    val thread: SmsThread,
+    val messages: List<SmsEntry>,
+)
+
 data class CarrierMmsAttachment(
     val uri: Uri,
     val mimeType: String,
@@ -134,6 +139,107 @@ object SmsRepository {
             byThread.values.toList()
                 .sortedByDescending(SmsThread::timestamp)
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Loads the conversation index and all SMS/MMS entries in one pass. List screens must use
+     * this instead of querying every thread separately; some Telephony providers serialize each
+     * query and become extremely slow with a real message history.
+     */
+    fun loadConversationSnapshot(context: Context): Result<List<SmsConversationSnapshot>> = runCatching {
+        check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
+        val threads = linkedMapOf<Long, SmsThread>()
+        val messages = linkedMapOf<Long, MutableList<SmsEntry>>()
+        val projection = arrayOf(
+            Telephony.Sms._ID,
+            Telephony.Sms.THREAD_ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.READ,
+            Telephony.Sms.TYPE,
+            Telephony.Sms.STATUS,
+        )
+        context.contentResolver.query(
+            Telephony.Sms.CONTENT_URI,
+            projection,
+            null,
+            null,
+            "${Telephony.Sms.DATE} ASC",
+        )?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
+            val threadIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
+            val addressIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
+            val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
+            val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
+            val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
+            val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+            val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
+            while (cursor.moveToNext()) {
+                val threadId = cursor.getLong(threadIndex)
+                if (threadId <= 0) continue
+                val type = cursor.getInt(typeIndex)
+                val incoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX
+                val read = cursor.getInt(readIndex) != 0
+                val address = cursor.getString(addressIndex).orEmpty().ifBlank { "Unknown sender" }
+                val body = cursor.getString(bodyIndex).orEmpty()
+                val timestamp = cursor.getLong(dateIndex)
+                messages.getOrPut(threadId, ::mutableListOf) += SmsEntry(
+                    id = cursor.getLong(idIndex),
+                    body = body,
+                    timestamp = timestamp,
+                    incoming = incoming,
+                    read = read,
+                    status = cursor.getInt(statusIndex),
+                )
+                val existing = threads[threadId]
+                threads[threadId] = SmsThread(
+                    threadId = threadId,
+                    address = if (address == "Unknown sender") existing?.address ?: address else address,
+                    body = body,
+                    timestamp = timestamp,
+                    unread = (existing?.unread ?: 0) + if (incoming && !read) 1 else 0,
+                    incoming = incoming,
+                )
+            }
+        }
+        loadMmsEntries(context, threadId = null, address = null).forEach { mms ->
+            val threadId = mms.threadId ?: return@forEach
+            val body = mms.body.ifBlank {
+                if (mms.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
+            }
+            messages.getOrPut(threadId, ::mutableListOf) += SmsEntry(
+                id = -mms.id - 1,
+                body = body,
+                timestamp = mms.timestamp,
+                incoming = mms.incoming,
+                read = mms.read,
+                status = mms.messageBox,
+                isMms = true,
+                mmsAttachment = mms.attachment,
+            )
+            val existing = threads[threadId]
+            val address = mms.address.ifBlank { existing?.address ?: "Unknown sender" }
+            val candidate = SmsThread(
+                threadId = threadId,
+                address = address,
+                body = body,
+                timestamp = mms.timestamp,
+                unread = (existing?.unread ?: 0) + if (mms.incoming && !mms.read) 1 else 0,
+                incoming = mms.incoming,
+            )
+            threads[threadId] = if (existing == null || candidate.timestamp >= existing.timestamp) {
+                candidate
+            } else {
+                existing.copy(unread = candidate.unread)
+            }
+        }
+        threads.values.map { thread ->
+            SmsConversationSnapshot(
+                thread = thread,
+                messages = messages[thread.threadId].orEmpty().sortedBy(SmsEntry::timestamp),
+            )
+        }.sortedByDescending { it.thread.timestamp }
     }
 
     fun loadMessages(context: Context, threadId: Long?, address: String): List<SmsEntry> {

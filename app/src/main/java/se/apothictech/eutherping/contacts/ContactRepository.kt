@@ -18,23 +18,25 @@ object ContactRepository {
         ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CONTACTS) ==
             PackageManager.PERMISSION_GRANTED
 
-    fun loadPhoneContacts(context: Context): List<PhoneContact> {
-        if (!hasPermission(context)) return emptyList()
+    fun loadPhoneContacts(context: Context): List<PhoneContact> =
+        loadPhoneContactsResult(context).getOrDefault(emptyList())
+
+    fun loadPhoneContactsResult(context: Context): Result<List<PhoneContact>> = runCatching {
+        check(hasPermission(context)) { "Contacts permission is not granted" }
         val projection = arrayOf(
             ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
             ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY,
             ContactsContract.CommonDataKinds.Phone.NUMBER,
         )
-        return runCatching {
-            val seen = hashSetOf<String>()
-            buildList {
-                context.contentResolver.query(
-                    ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
-                    projection,
-                    null,
-                    null,
-                    "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY} COLLATE NOCASE ASC",
-                )?.use { cursor ->
+        val seen = hashSetOf<String>()
+        buildList {
+            context.contentResolver.query(
+                ContactsContract.CommonDataKinds.Phone.CONTENT_URI,
+                projection,
+                null,
+                null,
+                "${ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME_PRIMARY} COLLATE NOCASE ASC",
+            )?.use { cursor ->
                     val idIndex = cursor.getColumnIndexOrThrow(
                         ContactsContract.CommonDataKinds.Phone.CONTACT_ID,
                     )
@@ -58,9 +60,8 @@ object ContactRepository {
                             ),
                         )
                     }
-                }
             }
-        }.getOrDefault(emptyList())
+        }
     }
 
     fun displayName(contacts: List<PhoneContact>, address: String): String? {

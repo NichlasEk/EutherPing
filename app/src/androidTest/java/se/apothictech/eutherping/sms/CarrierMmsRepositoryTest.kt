@@ -47,5 +47,10 @@ class CarrierMmsRepositoryTest {
             assertTrue(it.moveToFirst())
             assertNotNull(it.getString(0))
         }
+        val snapshot = SmsRepository.loadConversationSnapshot(context).getOrThrow()
+        assertTrue(
+            "One-pass history did not include the persisted carrier MMS",
+            snapshot.any { conversation -> conversation.messages.any(SmsEntry::isMms) },
+        )
     }
 }

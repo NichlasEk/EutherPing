@@ -116,6 +116,9 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import androidx.core.view.WindowCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import se.apothictech.eutherping.contacts.ContactRepository
 import se.apothictech.eutherping.contacts.PhoneContact
 import se.apothictech.eutherping.secure.SecurePeerState
@@ -125,6 +128,7 @@ import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.sms.CarrierMmsAttachment
 import se.apothictech.eutherping.sms.CarrierMmsRepository
 import se.apothictech.eutherping.sms.SmsRepository
+import se.apothictech.eutherping.sms.SmsConversationSnapshot
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -196,6 +200,78 @@ private data class DemoMessage(
     val carrierMmsAttachment: CarrierMmsAttachment? = null,
 )
 
+private data class DeckHistory(
+    val signals: List<Conversation> = emptyList(),
+    val vessels: List<Conversation> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+)
+
+private data class ContactsState(
+    val contacts: List<PhoneContact> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+)
+
+private fun buildDeckHistory(
+    context: android.content.Context,
+    snapshots: List<SmsConversationSnapshot>,
+    phoneContacts: List<PhoneContact>,
+): DeckHistory {
+    val signals = mutableListOf<Conversation>()
+    val vessels = mutableListOf<Conversation>()
+    snapshots.forEach { snapshot ->
+        val thread = snapshot.thread
+        val ordinaryMessages = mutableListOf<se.apothictech.eutherping.sms.SmsEntry>()
+        val secureMessages = mutableListOf<Pair<se.apothictech.eutherping.sms.SmsEntry, se.apothictech.eutherping.secure.SecureDecodedMessage>>()
+        snapshot.messages.forEach { message ->
+            val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
+                context = context,
+                address = thread.address,
+                body = message.body,
+                incoming = message.incoming,
+            )
+            if (decoded?.isSecure == true) {
+                secureMessages += message to decoded
+            } else {
+                ordinaryMessages += message
+            }
+        }
+        val contactName = ContactRepository.displayName(phoneContacts, thread.address)
+        ordinaryMessages.lastOrNull()?.let { latest ->
+            signals += Conversation(
+                id = (100_000L + thread.threadId).toInt(),
+                name = contactName ?: thread.address,
+                initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
+                preview = latest.body,
+                time = formatMessageTime(latest.timestamp),
+                transport = Transport.SMS,
+                unread = ordinaryMessages.count { it.incoming && !it.read },
+                distance = "ANDROID TELEPHONY",
+                smsAddress = thread.address,
+                threadId = thread.threadId,
+            )
+        }
+        val peer = SecureRepository.peer(context, thread.address)
+        if (peer.state != SecurePeerState.NONE || secureMessages.isNotEmpty()) {
+            val latest = secureMessages.lastOrNull()
+            vessels += Conversation(
+                id = (200_000L + thread.threadId).toInt(),
+                name = contactName ?: thread.address,
+                initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
+                preview = latest?.second?.text ?: securePeerPreview(peer.state),
+                time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
+                transport = Transport.SECURE,
+                unread = secureMessages.count { (message) -> message.incoming && !message.read },
+                distance = securePeerLabel(peer.state),
+                smsAddress = thread.address,
+                threadId = thread.threadId,
+            )
+        }
+    }
+    return DeckHistory(signals = signals, vessels = vessels)
+}
+
 class MainActivity : ComponentActivity() {
     private var requestedAddress by mutableStateOf<String?>(null)
     private var requestedSecureLane by mutableStateOf(false)
@@ -251,6 +327,14 @@ private fun EutherPingApp(
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
     var setupRevision by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) setupRevision++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
     val permissionsLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
@@ -362,6 +446,7 @@ private fun EutherPingApp(
                             isDefaultSmsApp = isDefaultSmsApp,
                             hasSmsPermissions = hasSmsPermissions,
                             smsRevision = smsRevision,
+                            permissionRevision = setupRevision,
                             appTheme = appTheme,
                             onThemeChange = { selectedTheme ->
                                 appTheme = selectedTheme
@@ -448,6 +533,7 @@ private fun SignalDeck(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
     smsRevision: Int,
+    permissionRevision: Int,
     appTheme: AppTheme,
     onThemeChange: (AppTheme) -> Unit,
     onRequestSmsSetup: () -> Unit,
@@ -462,18 +548,45 @@ private fun SignalDeck(
         contactPermissionRevision++
         if (granted) showContactSearch = true
     }
-    val hasContactsPermission = remember(contactPermissionRevision) {
+    val hasContactsPermission = remember(contactPermissionRevision, permissionRevision) {
         ContactRepository.hasPermission(context)
     }
-    val phoneContacts by produceState<List<PhoneContact>>(
-        initialValue = emptyList(),
+    val contactsState by produceState(
+        initialValue = ContactsState(loading = hasContactsPermission),
         hasContactsPermission,
         contactPermissionRevision,
+        permissionRevision,
     ) {
-        value = if (hasContactsPermission) {
-            withContext(Dispatchers.IO) { ContactRepository.loadPhoneContacts(context) }
+        value = if (!hasContactsPermission) {
+            ContactsState()
         } else {
-            emptyList()
+            withContext(Dispatchers.IO) {
+                ContactRepository.loadPhoneContactsResult(context).fold(
+                    onSuccess = { ContactsState(contacts = it) },
+                    onFailure = { ContactsState(error = it.message ?: it.javaClass.simpleName) },
+                )
+            }
+        }
+    }
+    val phoneContacts = contactsState.contacts
+    var historyRetry by remember { mutableIntStateOf(0) }
+    val realSmsReady = isDefaultSmsApp && hasSmsPermissions
+    val history by produceState(
+        initialValue = DeckHistory(loading = realSmsReady),
+        realSmsReady,
+        smsRevision,
+        phoneContacts,
+        historyRetry,
+    ) {
+        value = if (!realSmsReady) {
+            DeckHistory()
+        } else {
+            withContext(Dispatchers.IO) {
+                SmsRepository.loadConversationSnapshot(context).fold(
+                    onSuccess = { buildDeckHistory(context, it, phoneContacts) },
+                    onFailure = { DeckHistory(error = it.message ?: it.javaClass.simpleName) },
+                )
+            }
         }
     }
 
@@ -510,6 +623,8 @@ private fun SignalDeck(
             if (showContactSearch) {
                 ContactSearchScreen(
                     contacts = phoneContacts,
+                    loading = contactsState.loading,
+                    error = contactsState.error,
                     secureMode = selectedTab == SignalTab.CONTACTS,
                     onBack = { showContactSearch = false },
                     onContactSelected = { contact ->
@@ -536,16 +651,20 @@ private fun SignalDeck(
                     SignalTab.SIGNALS -> SignalsScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
                         hasSmsPermissions = hasSmsPermissions,
-                        smsRevision = smsRevision,
-                        phoneContacts = phoneContacts,
+                        conversations = history.signals,
+                        historyLoading = history.loading,
+                        historyError = history.error,
+                        onRetryHistory = { historyRetry++ },
                         onRequestSmsSetup = onRequestSmsSetup,
                         onOpenConversation = onOpenConversation,
                     )
                     SignalTab.CONTACTS -> VesselsScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
                         hasSmsPermissions = hasSmsPermissions,
-                        smsRevision = smsRevision,
-                        phoneContacts = phoneContacts,
+                        vessels = history.vessels,
+                        historyLoading = history.loading,
+                        historyError = history.error,
+                        onRetryHistory = { historyRetry++ },
                         onRequestSmsSetup = onRequestSmsSetup,
                         onOpenConversation = onOpenConversation,
                     )
@@ -589,7 +708,7 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.6.1",
+                "ACOUSTIC MESSAGE TERMINAL 0.6.2",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -611,61 +730,19 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
 private fun SignalsScreen(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
-    smsRevision: Int,
-    phoneContacts: List<PhoneContact>,
+    conversations: List<Conversation>,
+    historyLoading: Boolean,
+    historyError: String?,
+    onRetryHistory: () -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
 ) {
-    val context = LocalContext.current
     var showNewSignal by rememberSaveable { mutableStateOf(false) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
-    val smsConversations by produceState<List<Conversation>>(
-        initialValue = emptyList(),
-        realSmsReady,
-        smsRevision,
-        phoneContacts,
-    ) {
-        value = if (realSmsReady) {
-            withContext(Dispatchers.IO) {
-                SmsRepository.loadThreads(context).mapNotNull { thread ->
-                    val ordinaryMessages = SmsRepository.loadMessages(
-                        context = context,
-                        threadId = thread.threadId,
-                        address = thread.address,
-                    ).filter { message ->
-                        message.isMms || SecureRepository.decodeForDisplay(
-                            context = context,
-                            address = thread.address,
-                            body = message.body,
-                            incoming = message.incoming,
-                        ) == null
-                    }
-                    val latest = ordinaryMessages.lastOrNull() ?: return@mapNotNull null
-                    Conversation(
-                        id = (100_000L + thread.threadId).toInt(),
-                        name = ContactRepository.displayName(phoneContacts, thread.address) ?: thread.address,
-                        initials = ContactRepository.displayName(phoneContacts, thread.address)
-                            ?.let(::nameInitials) ?: addressInitials(thread.address),
-                        preview = latest.body,
-                        time = formatMessageTime(latest.timestamp),
-                        transport = Transport.SMS,
-                        unread = ordinaryMessages.count { it.incoming && !it.read },
-                        distance = "ANDROID TELEPHONY",
-                        smsAddress = thread.address,
-                        threadId = thread.threadId,
-                    )
-                }
-            }
-        } else {
-            emptyList()
-        }
-    }
-    val conversations = remember(realSmsReady, smsConversations) {
-        if (realSmsReady) {
-            smsConversations
-        } else {
-            sampleConversations().filter { it.transport == Transport.SMS }
-        }
+    val displayedConversations = if (realSmsReady) {
+        conversations
+    } else {
+        sampleConversations().filter { it.transport == Transport.SMS }
     }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -687,11 +764,16 @@ private fun SignalsScreen(
             item {
                 NewCellSignalButton(onClick = { showNewSignal = true })
             }
+            if (historyLoading || historyError != null) {
+                item {
+                    HistoryStatusCard(historyLoading, historyError, onRetryHistory)
+                }
+            }
         }
         item {
             SonarHero(
                 smsReady = realSmsReady,
-                activeSignals = conversations.size,
+                activeSignals = displayedConversations.size,
             )
         }
         item {
@@ -709,14 +791,14 @@ private fun SignalsScreen(
                     modifier = Modifier.weight(1f),
                 )
                 Text(
-                    "${conversations.size} CELL",
+                    "${displayedConversations.size} CELL",
                     color = Amber,
                     fontFamily = FontFamily.Monospace,
                     fontSize = 10.sp,
                 )
             }
         }
-        items(conversations, key = { it.id }) { conversation ->
+        items(displayedConversations, key = { it.id }) { conversation ->
             ConversationRow(conversation, onClick = { onOpenConversation(conversation) })
         }
     }
@@ -766,6 +848,40 @@ private fun SmsSetupBanner(isDefaultSmsApp: Boolean, onRequestSmsSetup: () -> Un
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Black,
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryStatusCard(loading: Boolean, error: String?, onRetry: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Amber.copy(alpha = 0.1f)),
+        border = BorderStroke(1.dp, Amber.copy(alpha = 0.45f)),
+        shape = RoundedCornerShape(14.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            Text(
+                if (loading) "READING ANDROID MESSAGE ARRAY…" else "MESSAGE ARRAY COULD NOT BE READ",
+                color = Amber,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 11.sp,
+            )
+            if (error != null) {
+                Text(
+                    error,
+                    color = Mist,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(top = 7.dp),
+                )
+                Button(
+                    onClick = onRetry,
+                    colors = ButtonDefaults.buttonColors(containerColor = Amber, contentColor = Void),
+                    modifier = Modifier.padding(top = 9.dp),
+                ) {
+                    Text("RETRY", fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                }
             }
         }
     }
@@ -1464,6 +1580,8 @@ private fun MessageBubble(
 @Composable
 private fun ContactSearchScreen(
     contacts: List<PhoneContact>,
+    loading: Boolean,
+    error: String?,
     secureMode: Boolean,
     onBack: () -> Unit,
     onContactSelected: (PhoneContact) -> Unit,
@@ -1540,7 +1658,12 @@ private fun ContactSearchScreen(
             if (filteredContacts.isEmpty()) {
                 item {
                     Text(
-                        if (contacts.isEmpty()) "NO PHONE CONTACTS DETECTED" else "NO MATCHING VESSEL",
+                        when {
+                            loading -> "READING PHONE CONTACTS…"
+                            error != null -> "CONTACT PROVIDER ERROR // $error"
+                            contacts.isEmpty() -> "NO PHONE CONTACTS DETECTED"
+                            else -> "NO MATCHING VESSEL"
+                        },
                         color = Muted,
                         fontFamily = FontFamily.Monospace,
                         modifier = Modifier.fillMaxWidth().padding(24.dp),
@@ -1764,59 +1887,14 @@ private fun Composer(
 private fun VesselsScreen(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
-    smsRevision: Int,
-    phoneContacts: List<PhoneContact>,
+    vessels: List<Conversation>,
+    historyLoading: Boolean,
+    historyError: String?,
+    onRetryHistory: () -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
 ) {
-    val context = LocalContext.current
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
-    val vessels by produceState<List<Conversation>>(
-        initialValue = emptyList(),
-        realSmsReady,
-        smsRevision,
-        phoneContacts,
-    ) {
-        value = if (!realSmsReady) {
-            emptyList()
-        } else {
-            withContext(Dispatchers.IO) {
-                SmsRepository.loadThreads(context).mapNotNull { thread ->
-                    val peer = SecureRepository.peer(context, thread.address)
-                    val secureMessages = SmsRepository.loadMessages(
-                        context = context,
-                        threadId = thread.threadId,
-                        address = thread.address,
-                    ).mapNotNull { message ->
-                        val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
-                            context = context,
-                            address = thread.address,
-                            body = message.body,
-                            incoming = message.incoming,
-                        )
-                        if (decoded?.isSecure == true) message to decoded else null
-                    }
-                    if (peer.state == SecurePeerState.NONE && secureMessages.isEmpty()) {
-                        return@mapNotNull null
-                    }
-                    val latest = secureMessages.lastOrNull()
-                    val contactName = ContactRepository.displayName(phoneContacts, thread.address)
-                    Conversation(
-                        id = (200_000L + thread.threadId).toInt(),
-                        name = contactName ?: thread.address,
-                        initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
-                        preview = latest?.second?.text ?: securePeerPreview(peer.state),
-                        time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
-                        transport = Transport.SECURE,
-                        unread = secureMessages.count { (message) -> message.incoming && !message.read },
-                        distance = securePeerLabel(peer.state),
-                        smsAddress = thread.address,
-                        threadId = thread.threadId,
-                    )
-                }
-            }
-        }
-    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -1828,6 +1906,10 @@ private fun VesselsScreen(
                     isDefaultSmsApp = isDefaultSmsApp,
                     onRequestSmsSetup = onRequestSmsSetup,
                 )
+            }
+        } else if (historyLoading || historyError != null) {
+            item {
+                HistoryStatusCard(historyLoading, historyError, onRetryHistory)
             }
         }
         item {
@@ -1849,7 +1931,7 @@ private fun VesselsScreen(
                 modifier = Modifier.padding(bottom = 5.dp),
             )
         }
-        if (realSmsReady && vessels.isEmpty()) {
+        if (realSmsReady && !historyLoading && historyError == null && vessels.isEmpty()) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Violet.copy(alpha = 0.08f)),
