@@ -355,6 +355,21 @@ object SecureRepository {
         else -> null
     }
 
+    /** Removes the sender-side plaintext copy after its Telephony row is deleted. */
+    fun forgetOutgoingPlaintext(context: Context, body: String) {
+        val messageId = runCatching {
+            when {
+                body.startsWith(MESSAGE_PREFIX) -> parseMessageOuter(body).getString("id")
+                body.startsWith(ATTACHMENT_PREFIX) -> parseAttachmentOuter(body).getString("id")
+                else -> null
+            }
+        }.getOrNull() ?: return
+        context.getSharedPreferences(VAULT_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(messageId)
+            .apply()
+    }
+
     fun notificationText(context: Context, address: String, body: String): String = when {
         body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_INVITE_PREFIX) -> if (
             isValidBundle(

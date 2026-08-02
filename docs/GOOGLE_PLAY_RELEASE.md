@@ -2,7 +2,7 @@
 
 Checked against Google Play and Android default-handler guidance on 2026-08-02. Policies change; re-check the official policy pages at submission time.
 
-## Already aligned in 0.6.4
+## Already aligned in 0.6.5
 
 - Messaging is the app's prominent core functionality, not a secondary permission use.
 - The app asks for Android's SMS role before requesting SMS permissions.

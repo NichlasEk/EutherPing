@@ -40,6 +40,25 @@ data class SmsConversationSnapshot(
     val messages: List<SmsEntry>,
 )
 
+/**
+ * The small amount of data the inbox needs from a thread. Keeping this separate from
+ * [SmsConversationSnapshot] avoids retaining every message body just to render one row.
+ */
+data class SmsConversationIndexEntry(
+    val threadId: Long,
+    val address: String,
+    val latestOrdinary: SmsEntry?,
+    val latestSecure: SmsEntry?,
+    val ordinaryUnread: Int,
+    val secureUnread: Int,
+    val latestTimestamp: Long,
+)
+
+data class SmsMessagePage(
+    val messages: List<SmsEntry>,
+    val hasOlder: Boolean,
+)
+
 data class CarrierMmsAttachment(
     val uri: Uri,
     val mimeType: String,
@@ -139,6 +158,127 @@ object SmsRepository {
             byThread.values.toList()
                 .sortedByDescending(SmsThread::timestamp)
         }.getOrDefault(emptyList())
+    }
+
+    /**
+     * Scans Telephony once but retains only the latest ordinary and secure message per thread.
+     * The old snapshot path materialized every message and the UI then decrypted all of them,
+     * which made inbox refresh increasingly expensive as the device history grew.
+     */
+    fun loadConversationIndex(
+        context: Context,
+        isSecureBody: (String) -> Boolean,
+    ): Result<List<SmsConversationIndexEntry>> = runCatching {
+        check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
+        data class MutableIndex(
+            var address: String = "",
+            var latestOrdinary: SmsEntry? = null,
+            var latestSecure: SmsEntry? = null,
+            var ordinaryUnread: Int = 0,
+            var secureUnread: Int = 0,
+            var latestTimestamp: Long = 0L,
+        )
+
+        val threads = linkedMapOf<Long, MutableIndex>()
+        val projection = arrayOf(
+            Telephony.Sms._ID,
+            Telephony.Sms.THREAD_ID,
+            Telephony.Sms.ADDRESS,
+            Telephony.Sms.BODY,
+            Telephony.Sms.DATE,
+            Telephony.Sms.READ,
+            Telephony.Sms.TYPE,
+            Telephony.Sms.STATUS,
+        )
+        checkNotNull(
+            context.contentResolver.query(
+                Telephony.Sms.CONTENT_URI,
+                projection,
+                null,
+                null,
+                "${Telephony.Sms.DATE} ASC",
+            ),
+        ) { "Android's SMS provider returned no message cursor" }.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
+            val threadIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
+            val addressIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
+            val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
+            val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
+            val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
+            val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+            val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
+            while (cursor.moveToNext()) {
+                val threadId = cursor.getLong(threadIndex)
+                if (threadId <= 0) continue
+                val body = cursor.getString(bodyIndex).orEmpty()
+                val type = cursor.getInt(typeIndex)
+                val incoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX
+                val read = cursor.getInt(readIndex) != 0
+                val timestamp = cursor.getLong(dateIndex)
+                val entry = SmsEntry(
+                    id = cursor.getLong(idIndex),
+                    body = body,
+                    timestamp = timestamp,
+                    incoming = incoming,
+                    read = read,
+                    status = cursor.getInt(statusIndex),
+                )
+                val index = threads.getOrPut(threadId, ::MutableIndex)
+                val address = cursor.getString(addressIndex).orEmpty()
+                if (address.isNotBlank()) index.address = address
+                index.latestTimestamp = maxOf(index.latestTimestamp, timestamp)
+                if (isSecureBody(body)) {
+                    index.latestSecure = entry
+                    if (incoming && !read) index.secureUnread++
+                } else {
+                    index.latestOrdinary = entry
+                    if (incoming && !read) index.ordinaryUnread++
+                }
+            }
+        }
+
+        val resolvedMmsAddresses = mutableMapOf<Long, String>()
+        loadMmsEntries(
+            context,
+            threadId = null,
+            address = null,
+            includeParts = false,
+            resolveAddresses = false,
+        ).forEach { mms ->
+            val threadId = mms.threadId ?: return@forEach
+            val index = threads.getOrPut(threadId, ::MutableIndex)
+            if (index.address.isBlank()) {
+                index.address = resolvedMmsAddresses.getOrPut(threadId) {
+                    mmsAddress(context, mms.id, mms.incoming)
+                }
+            }
+            val entry = SmsEntry(
+                id = -mms.id - 1,
+                body = mms.body.ifBlank { "📷 Carrier MMS" },
+                timestamp = mms.timestamp,
+                incoming = mms.incoming,
+                read = mms.read,
+                status = mms.messageBox,
+                isMms = true,
+            )
+            if (index.latestOrdinary == null || mms.timestamp >= index.latestOrdinary!!.timestamp) {
+                index.latestOrdinary = entry
+            }
+            index.latestTimestamp = maxOf(index.latestTimestamp, mms.timestamp)
+            if (mms.incoming && !mms.read) index.ordinaryUnread++
+        }
+
+        threads.map { (threadId, index) ->
+            SmsConversationIndexEntry(
+                threadId = threadId,
+                address = index.address.ifBlank { "Unknown sender" },
+                latestOrdinary = index.latestOrdinary,
+                latestSecure = index.latestSecure,
+                ordinaryUnread = index.ordinaryUnread,
+                secureUnread = index.secureUnread,
+                latestTimestamp = index.latestTimestamp,
+            )
+        }.sortedByDescending(SmsConversationIndexEntry::latestTimestamp)
     }
 
     /**
@@ -243,7 +383,19 @@ object SmsRepository {
     }
 
     fun loadMessages(context: Context, threadId: Long?, address: String): List<SmsEntry> {
-        if (!hasSmsPermissions(context)) return emptyList()
+        return loadMessagePage(context, threadId, address, Int.MAX_VALUE)
+            .getOrDefault(SmsMessagePage(emptyList(), hasOlder = false))
+            .messages
+    }
+
+    fun loadMessagePage(
+        context: Context,
+        threadId: Long?,
+        address: String,
+        limit: Int,
+    ): Result<SmsMessagePage> = runCatching {
+        check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
+        require(limit > 0) { "Message limit must be positive" }
         val projection = arrayOf(
             Telephony.Sms._ID,
             Telephony.Sms.BODY,
@@ -261,53 +413,56 @@ object SmsRepository {
             selection = "${Telephony.Sms.ADDRESS} = ?"
             arguments = arrayOf(address)
         }
-        return runCatching {
-            buildList {
-                context.contentResolver.query(
-                    Telephony.Sms.CONTENT_URI,
-                    projection,
-                    selection,
-                    arguments,
-                    "${Telephony.Sms.DATE} ASC",
-                )?.use { cursor ->
-                    val idIndex = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
-                    val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
-                    val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
-                    val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
-                    val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
-                    val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
-                    while (cursor.moveToNext()) {
-                        val type = cursor.getInt(typeIndex)
-                        add(
-                            SmsEntry(
-                                id = cursor.getLong(idIndex),
-                                body = cursor.getString(bodyIndex).orEmpty(),
-                                timestamp = cursor.getLong(dateIndex),
-                                incoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX,
-                                read = cursor.getInt(readIndex) != 0,
-                                status = cursor.getInt(statusIndex),
-                            ),
-                        )
-                    }
+        val candidates = mutableListOf<SmsEntry>()
+        var smsTruncated = false
+        context.contentResolver.query(
+            Telephony.Sms.CONTENT_URI,
+            projection,
+            selection,
+            arguments,
+            "${Telephony.Sms.DATE} DESC",
+        )?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
+            val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
+            val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.DATE)
+            val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
+            val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
+            val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
+            while (cursor.moveToNext()) {
+                if (candidates.size >= limit) {
+                    smsTruncated = true
+                    break
                 }
-                loadMmsEntries(context, threadId, address).forEach { mms ->
-                    add(
-                        SmsEntry(
-                            id = -mms.id - 1,
-                            body = mms.body.ifBlank {
-                                if (mms.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
-                            },
-                            timestamp = mms.timestamp,
-                            incoming = mms.incoming,
-                            read = mms.read,
-                            status = mms.messageBox,
-                            isMms = true,
-                            mmsAttachment = mms.attachment,
-                        ),
-                    )
-                }
-            }.sortedBy(SmsEntry::timestamp)
-        }.getOrDefault(emptyList())
+                val type = cursor.getInt(typeIndex)
+                candidates += SmsEntry(
+                    id = cursor.getLong(idIndex),
+                    body = cursor.getString(bodyIndex).orEmpty(),
+                    timestamp = cursor.getLong(dateIndex),
+                    incoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX,
+                    read = cursor.getInt(readIndex) != 0,
+                    status = cursor.getInt(statusIndex),
+                )
+            }
+        }
+        loadMmsEntries(context, threadId, address).forEach { mms ->
+            candidates += SmsEntry(
+                id = -mms.id - 1,
+                body = mms.body.ifBlank {
+                    if (mms.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
+                },
+                timestamp = mms.timestamp,
+                incoming = mms.incoming,
+                read = mms.read,
+                status = mms.messageBox,
+                isMms = true,
+                mmsAttachment = mms.attachment,
+            )
+        }
+        val newest = candidates.sortedByDescending(SmsEntry::timestamp)
+        SmsMessagePage(
+            messages = newest.take(limit).sortedBy(SmsEntry::timestamp),
+            hasOlder = smsTruncated || newest.size > limit,
+        )
     }
 
     private data class MmsEntry(
@@ -327,6 +482,7 @@ object SmsRepository {
         threadId: Long?,
         address: String?,
         includeParts: Boolean = true,
+        resolveAddresses: Boolean = true,
     ): List<MmsEntry> = runCatching {
         buildList {
             val projection = arrayOf(
@@ -354,7 +510,11 @@ object SmsRepository {
                     val id = cursor.getLong(idIndex)
                     val box = cursor.getInt(boxIndex)
                     val incoming = box == Telephony.Mms.MESSAGE_BOX_INBOX
-                    val mmsAddress = mmsAddress(context, id, incoming)
+                    val mmsAddress = when {
+                        !resolveAddresses -> ""
+                        threadId != null && address != null -> address
+                        else -> mmsAddress(context, id, incoming)
+                    }
                     if (address != null && !PhoneNumberUtils.compare(address, mmsAddress)) continue
                     val parts = if (includeParts) mmsParts(context, id) else "" to null
                     val subject = cursor.getString(subjectIndex).orEmpty().trim()
@@ -453,6 +613,29 @@ object SmsRepository {
                 arrayOf(threadId.toString()),
             )
         }
+    }
+
+    fun deleteMessage(context: Context, messageId: Long, isMms: Boolean): Result<Unit> = runCatching {
+        check(isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
+        val providerId = if (isMms) -messageId - 1 else messageId
+        require(providerId >= 0) { "Invalid message identifier" }
+        val uri = if (isMms) {
+            Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, providerId.toString())
+        } else {
+            Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, providerId.toString())
+        }
+        check(context.contentResolver.delete(uri, null, null) > 0) {
+            "Android did not delete the message"
+        }
+    }
+
+    fun deleteThread(context: Context, threadId: Long): Result<Int> = runCatching {
+        check(isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
+        require(threadId > 0) { "Invalid conversation identifier" }
+        val selection = "${Telephony.Sms.THREAD_ID} = ?"
+        val arguments = arrayOf(threadId.toString())
+        context.contentResolver.delete(Telephony.Sms.CONTENT_URI, selection, arguments) +
+            context.contentResolver.delete(Telephony.Mms.CONTENT_URI, selection, arguments)
     }
 
     fun persistIncoming(context: Context, address: String, body: String, timestamp: Long): Uri? {

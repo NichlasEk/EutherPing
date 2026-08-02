@@ -10,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Telephony
 import android.util.Log
 import android.widget.Toast
@@ -33,6 +34,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -65,6 +67,8 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -108,9 +112,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -135,7 +141,7 @@ import se.apothictech.eutherping.sms.CachedConversation
 import se.apothictech.eutherping.sms.CachedConversationIndex
 import se.apothictech.eutherping.sms.ConversationIndexCache
 import se.apothictech.eutherping.sms.SmsRepository
-import se.apothictech.eutherping.sms.SmsConversationSnapshot
+import se.apothictech.eutherping.sms.SmsConversationIndexEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -205,6 +211,8 @@ private data class DemoMessage(
     val transport: Transport,
     val attachment: SecureAttachmentDescriptor? = null,
     val carrierMmsAttachment: CarrierMmsAttachment? = null,
+    val wireBody: String = text,
+    val isMms: Boolean = false,
 )
 
 private data class DeckHistory(
@@ -218,6 +226,11 @@ private data class ContactsState(
     val contacts: List<PhoneContact> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
+)
+
+private data class LoadedConversationMessages(
+    val messages: List<DemoMessage> = emptyList(),
+    val hasOlder: Boolean = false,
 )
 
 private fun applyContactNames(history: DeckHistory, contacts: List<PhoneContact>): DeckHistory {
@@ -276,55 +289,46 @@ private fun CachedConversationIndex.live() = DeckHistory(
 
 private fun buildDeckHistory(
     context: android.content.Context,
-    snapshots: List<SmsConversationSnapshot>,
+    entries: List<SmsConversationIndexEntry>,
 ): DeckHistory {
     val signals = mutableListOf<Conversation>()
     val vessels = mutableListOf<Conversation>()
-    snapshots.forEach { snapshot ->
-        val thread = snapshot.thread
-        val ordinaryMessages = mutableListOf<se.apothictech.eutherping.sms.SmsEntry>()
-        val secureMessages = mutableListOf<Pair<se.apothictech.eutherping.sms.SmsEntry, se.apothictech.eutherping.secure.SecureDecodedMessage>>()
-        snapshot.messages.forEach { message ->
-            val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
-                context = context,
-                address = thread.address,
-                body = message.body,
-                incoming = message.incoming,
-            )
-            if (decoded?.isSecure == true) {
-                secureMessages += message to decoded
-            } else {
-                ordinaryMessages += message
-            }
-        }
-        ordinaryMessages.lastOrNull()?.let { latest ->
+    entries.forEach { entry ->
+        entry.latestOrdinary?.let { latest ->
             signals += Conversation(
-                id = (100_000L + thread.threadId).toInt(),
-                name = thread.address,
-                initials = addressInitials(thread.address),
+                id = (100_000L + entry.threadId).toInt(),
+                name = entry.address,
+                initials = addressInitials(entry.address),
                 preview = latest.body,
                 time = formatMessageTime(latest.timestamp),
                 transport = Transport.SMS,
-                unread = ordinaryMessages.count { it.incoming && !it.read },
+                unread = entry.ordinaryUnread,
                 distance = "ANDROID TELEPHONY",
-                smsAddress = thread.address,
-                threadId = thread.threadId,
+                smsAddress = entry.address,
+                threadId = entry.threadId,
             )
         }
-        val peer = SecureRepository.peer(context, thread.address)
-        if (peer.state != SecurePeerState.NONE || secureMessages.isNotEmpty()) {
-            val latest = secureMessages.lastOrNull()
+        val peer = SecureRepository.peer(context, entry.address)
+        if (peer.state != SecurePeerState.NONE || entry.latestSecure != null) {
+            val decoded = entry.latestSecure?.let { message ->
+                SecureRepository.decodeForDisplay(
+                context = context,
+                    address = entry.address,
+                body = message.body,
+                incoming = message.incoming,
+                )
+            }
             vessels += Conversation(
-                id = (200_000L + thread.threadId).toInt(),
-                name = thread.address,
-                initials = addressInitials(thread.address),
-                preview = latest?.second?.text ?: securePeerPreview(peer.state),
-                time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
+                id = (200_000L + entry.threadId).toInt(),
+                name = entry.address,
+                initials = addressInitials(entry.address),
+                preview = decoded?.text ?: securePeerPreview(peer.state),
+                time = formatMessageTime(entry.latestSecure?.timestamp ?: entry.latestTimestamp),
                 transport = Transport.SECURE,
-                unread = secureMessages.count { (message) -> message.incoming && !message.read },
+                unread = entry.secureUnread,
                 distance = securePeerLabel(peer.state),
-                smsAddress = thread.address,
-                threadId = thread.threadId,
+                smsAddress = entry.address,
+                threadId = entry.threadId,
             )
         }
     }
@@ -498,28 +502,36 @@ private fun EutherPingApp(
         MaterialTheme(colorScheme = scheme) {
             Surface(modifier = Modifier.fillMaxSize(), color = Void) {
                 AbyssBackground {
-                    if (activeConversation == null) {
-                        SignalDeck(
-                            selectedTab = selectedTab,
-                            onSelectedTabChange = { selectedTab = it },
-                            isDefaultSmsApp = isDefaultSmsApp,
-                            hasSmsPermissions = hasSmsPermissions,
-                            smsRevision = smsRevision,
-                            permissionRevision = setupRevision,
-                            appTheme = appTheme,
-                            onThemeChange = { selectedTheme ->
-                                appTheme = selectedTheme
-                                saveAppTheme(context, selectedTheme)
-                            },
-                            onRequestSmsSetup = ::requestSmsSetup,
-                            onOpenConversation = { activeConversation = it },
-                        )
-                    } else {
-                        ConversationDeck(
-                            conversation = activeConversation!!,
-                            smsRevision = smsRevision,
-                            onBack = { activeConversation = null },
-                        )
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .alpha(if (activeConversation == null) 1f else 0f),
+                        ) {
+                            SignalDeck(
+                                selectedTab = selectedTab,
+                                onSelectedTabChange = { selectedTab = it },
+                                isDefaultSmsApp = isDefaultSmsApp,
+                                hasSmsPermissions = hasSmsPermissions,
+                                smsRevision = smsRevision,
+                                permissionRevision = setupRevision,
+                                appTheme = appTheme,
+                                interactionEnabled = activeConversation == null,
+                                onThemeChange = { selectedTheme ->
+                                    appTheme = selectedTheme
+                                    saveAppTheme(context, selectedTheme)
+                                },
+                                onRequestSmsSetup = ::requestSmsSetup,
+                                onOpenConversation = { activeConversation = it },
+                            )
+                        }
+                        activeConversation?.let { conversation ->
+                            ConversationDeck(
+                                conversation = conversation,
+                                smsRevision = smsRevision,
+                                onBack = { activeConversation = null },
+                            )
+                        }
                     }
                 }
             }
@@ -600,6 +612,7 @@ private fun SignalDeck(
     smsRevision: Int,
     permissionRevision: Int,
     appTheme: AppTheme,
+    interactionEnabled: Boolean,
     onThemeChange: (AppTheme) -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
@@ -655,8 +668,17 @@ private fun SignalDeck(
             val cached = withContext(Dispatchers.IO) { ConversationIndexCache.load(context) }
             if (cached != null) value = cached.live()
             val refreshed = withContext(Dispatchers.IO) {
-                SmsRepository.loadConversationSnapshot(context).fold(
-                    onSuccess = { buildDeckHistory(context, it) },
+                val startedAt = SystemClock.elapsedRealtime()
+                SmsRepository.loadConversationIndex(context, SecureRepository::isSecureBody).fold(
+                    onSuccess = {
+                        buildDeckHistory(context, it).also { history ->
+                            Log.i(
+                                "EutherPingPerf",
+                                "conversation-index loaded in ${SystemClock.elapsedRealtime() - startedAt} ms " +
+                                    "(${history.signals.size} signals, ${history.vessels.size} vessels)",
+                            )
+                        }
+                    },
                     onFailure = {
                         if (cached != null) {
                             cached.live().copy(loading = false, error = it.message ?: it.javaClass.simpleName)
@@ -684,7 +706,7 @@ private fun SignalDeck(
         }
     }
 
-    BackHandler(enabled = showContactSearch || selectedTab != SignalTab.SIGNALS) {
+    BackHandler(enabled = interactionEnabled && (showContactSearch || selectedTab != SignalTab.SIGNALS)) {
         if (showContactSearch) {
             showContactSearch = false
         } else {
@@ -727,6 +749,8 @@ private fun SignalDeck(
             } else {
                 DeckHeader(
                     onSearch = if (selectedTab == SignalTab.SYSTEM) null else ::openContactSearch,
+                    onRefresh = { historyRetry++ },
+                    onOpenSystem = { onSelectedTabChange(SignalTab.SYSTEM) },
                     searchDescription = if (selectedTab == SignalTab.CONTACTS) {
                         "Find a vessel"
                     } else {
@@ -768,7 +792,13 @@ private fun SignalDeck(
 }
 
 @Composable
-private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
+private fun DeckHeader(
+    onSearch: (() -> Unit)?,
+    onRefresh: () -> Unit,
+    onOpenSystem: () -> Unit,
+    searchDescription: String,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -794,7 +824,7 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.6.4",
+                "ACOUSTIC MESSAGE TERMINAL 0.6.5",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -806,8 +836,24 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 Icon(Icons.Default.Search, contentDescription = searchDescription, tint = Toxic)
             }
         }
-        IconButton(onClick = {}) {
+        IconButton(onClick = { menuExpanded = true }) {
             Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Muted)
+        }
+        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            DropdownMenuItem(
+                text = { Text("Refresh messages") },
+                onClick = {
+                    menuExpanded = false
+                    onRefresh()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text("System and privacy") },
+                onClick = {
+                    menuExpanded = false
+                    onOpenSystem()
+                },
+            )
         }
     }
 }
@@ -1207,9 +1253,15 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
 private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBack: () -> Unit) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
     var secureRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     var attachmentRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     var attachmentBusy by remember(conversation.smsAddress) { mutableStateOf(false) }
+    var selectedMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
+    var forwardingMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
+    var deleteMessageCandidate by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
+    var showDeleteConversation by remember(conversation.id) { mutableStateOf(false) }
+    var messageLimit by remember(conversation.id) { mutableIntStateOf(150) }
     val demoMessages = remember(conversation.id) {
         mutableStateListOf(
             DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", conversation.transport),
@@ -1226,44 +1278,63 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             null
         }
     }
-    val realMessages by produceState<List<DemoMessage>>(
-        initialValue = emptyList(),
+    val realMessagePage by produceState(
+        initialValue = LoadedConversationMessages(),
         conversation.threadId,
         conversation.smsAddress,
         smsRevision,
         secureRevision,
         attachmentRevision,
+        messageLimit,
     ) {
         value = if (isRealSms) {
             withContext(Dispatchers.IO) {
-                SmsRepository.loadMessages(
+                val startedAt = SystemClock.elapsedRealtime()
+                SmsRepository.loadMessagePage(
                     context = context,
                     threadId = conversation.threadId,
                     address = conversation.smsAddress.orEmpty(),
-                ).mapNotNull { message ->
-                    val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
-                        context = context,
-                        address = conversation.smsAddress.orEmpty(),
-                        body = message.body,
-                        incoming = message.incoming,
-                    )
-                    if (secureLane != (decoded?.isSecure == true)) return@mapNotNull null
-                    DemoMessage(
-                        id = message.id,
-                        text = decoded?.text ?: message.body,
-                        outgoing = !message.incoming,
-                        time = formatMessageTime(message.timestamp),
-                        transport = conversation.transport,
-                        attachment = decoded?.attachment,
-                        carrierMmsAttachment = message.mmsAttachment,
-                    )
+                    limit = messageLimit,
+                ).getOrElse { error ->
+                    Log.e("EutherPingPerf", "Conversation load failed", error)
+                    return@withContext LoadedConversationMessages()
+                }.let { page ->
+                    LoadedConversationMessages(
+                        hasOlder = page.hasOlder,
+                        messages = page.messages.mapNotNull { message ->
+                            val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
+                                context = context,
+                                address = conversation.smsAddress.orEmpty(),
+                                body = message.body,
+                                incoming = message.incoming,
+                            )
+                            if (secureLane != (decoded?.isSecure == true)) return@mapNotNull null
+                            DemoMessage(
+                                id = message.id,
+                                text = decoded?.text ?: message.body,
+                                outgoing = !message.incoming,
+                                time = formatMessageTime(message.timestamp),
+                                transport = conversation.transport,
+                                attachment = decoded?.attachment,
+                                carrierMmsAttachment = message.mmsAttachment,
+                                wireBody = message.body,
+                                isMms = message.isMms,
+                            )
+                        },
+                    ).also {
+                        Log.i(
+                            "EutherPingPerf",
+                            "conversation loaded in ${SystemClock.elapsedRealtime() - startedAt} ms " +
+                                "(${it.messages.size} visible, limit=$messageLimit)",
+                        )
+                    }
                 }
             }
         } else {
-            emptyList()
+            LoadedConversationMessages()
         }
     }
-    val messages = if (isRealSms) realMessages else demoMessages
+    val messages = if (isRealSms) realMessagePage.messages else demoMessages
     var composerTransport by rememberSaveable(conversation.id) {
         mutableStateOf(conversation.transport)
     }
@@ -1373,7 +1444,14 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
 
     Scaffold(
         containerColor = Color.Transparent,
-        topBar = { ConversationHeader(conversation, securePeer?.state, onBack) },
+        topBar = {
+            ConversationHeader(
+                conversation = conversation,
+                securePeerState = securePeer?.state,
+                onDeleteConversation = { showDeleteConversation = true },
+                onBack = onBack,
+            )
+        },
         bottomBar = {
             Composer(
                 draft = draft,
@@ -1451,6 +1529,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     MessageBubble(
                         message = message,
                         attachmentRevision = attachmentRevision,
+                        onLongPress = { selectedMessage = message },
                         onAttachment = { descriptor ->
                             if (!descriptor.incoming) {
                                 Toast.makeText(
@@ -1491,6 +1570,16 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         },
                     )
                 }
+                if (isRealSms && realMessagePage.hasOlder) {
+                    item {
+                        TextButton(
+                            onClick = { messageLimit += 250 },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("LOAD 250 OLDER MESSAGES")
+                        }
+                    }
+                }
                 item {
                     Text(
                         if (secureLane) {
@@ -1510,15 +1599,191 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             }
         }
     }
+
+    selectedMessage?.let { message ->
+        MessageActionsDialog(
+            message = message,
+            onDismiss = { selectedMessage = null },
+            onCopy = {
+                clipboard.setText(AnnotatedString(message.text))
+                selectedMessage = null
+                Toast.makeText(context, "Message copied", Toast.LENGTH_SHORT).show()
+            },
+            onForward = {
+                selectedMessage = null
+                forwardingMessage = message
+            },
+            onDelete = {
+                selectedMessage = null
+                deleteMessageCandidate = message
+            },
+        )
+    }
+    forwardingMessage?.let { message ->
+        ForwardMessageDialog(
+            secure = secureLane,
+            onDismiss = { forwardingMessage = null },
+            onForward = { address ->
+                forwardingMessage = null
+                coroutineScope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        val body = if (secureLane) {
+                            SecureRepository.encryptMessage(context, address, message.text)
+                        } else {
+                            Result.success(message.text)
+                        }
+                        body.flatMap { SmsRepository.sendText(context, address, it) }
+                    }
+                    result.onSuccess {
+                        Toast.makeText(context, "Message forwarded", Toast.LENGTH_SHORT).show()
+                    }.onFailure {
+                        Toast.makeText(context, "Forward failed: ${it.message}", Toast.LENGTH_LONG).show()
+                    }
+                }
+            },
+        )
+    }
+    deleteMessageCandidate?.let { message ->
+        AlertDialog(
+            onDismissRequest = { deleteMessageCandidate = null },
+            title = { Text("Delete message?") },
+            text = { Text("This removes the message from this phone's Android message history.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteMessageCandidate = null
+                        coroutineScope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                SmsRepository.deleteMessage(context, message.id, message.isMms).onSuccess {
+                                    if (!message.outgoing) return@onSuccess
+                                    SecureRepository.forgetOutgoingPlaintext(context, message.wireBody)
+                                }
+                            }
+                            result.onSuccess { attachmentRevision++ }
+                                .onFailure {
+                                    Toast.makeText(context, "Delete failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                }
+                        }
+                    },
+                ) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { deleteMessageCandidate = null }) { Text("Cancel") }
+            },
+        )
+    }
+    if (showDeleteConversation) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConversation = false },
+            title = { Text("Delete conversation?") },
+            text = { Text("All SMS and MMS in this conversation will be removed from this phone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showDeleteConversation = false
+                        val threadId = conversation.threadId ?: return@TextButton
+                        coroutineScope.launch {
+                            val result = withContext(Dispatchers.IO) {
+                                SmsRepository.deleteThread(context, threadId)
+                            }
+                            result.onSuccess { onBack() }
+                                .onFailure {
+                                    Toast.makeText(context, "Delete failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                }
+                        }
+                    },
+                ) { Text("Delete all") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showDeleteConversation = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun MessageActionsDialog(
+    message: DemoMessage,
+    onDismiss: () -> Unit,
+    onCopy: () -> Unit,
+    onForward: () -> Unit,
+    onDelete: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Message actions") },
+        text = {
+            Column {
+                Text(
+                    message.text,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+                TextButton(onClick = onCopy, modifier = Modifier.fillMaxWidth()) {
+                    Text("Copy text")
+                }
+                TextButton(onClick = onForward, modifier = Modifier.fillMaxWidth()) {
+                    Text("Forward${if (message.transport == Transport.SECURE) " securely" else ""}")
+                }
+                TextButton(onClick = onDelete, modifier = Modifier.fillMaxWidth()) {
+                    Text("Delete from this phone")
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
+private fun ForwardMessageDialog(
+    secure: Boolean,
+    onDismiss: () -> Unit,
+    onForward: (String) -> Unit,
+) {
+    var address by rememberSaveable { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (secure) "Forward securely" else "Forward message") },
+        text = {
+            Column {
+                Text(
+                    if (secure) {
+                        "Enter a verified Vessel address. The text will be encrypted again for that recipient."
+                    } else {
+                        "Enter the recipient phone number."
+                    },
+                    modifier = Modifier.padding(bottom = 10.dp),
+                )
+                OutlinedTextField(
+                    value = address,
+                    onValueChange = { address = it },
+                    label = { Text("Phone number") },
+                    singleLine = true,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = address.isNotBlank(),
+                onClick = { onForward(address.trim()) },
+            ) { Text("Forward") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 @Composable
 private fun ConversationHeader(
     conversation: Conversation,
     securePeerState: SecurePeerState?,
+    onDeleteConversation: () -> Unit,
     onBack: () -> Unit,
 ) {
     val accent = if (conversation.transport == Transport.SECURE) Violet else Amber
+    val clipboard = LocalClipboardManager.current
+    var menuExpanded by remember(conversation.id) { mutableStateOf(false) }
     Column(modifier = Modifier.background(Deep)) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 7.dp),
@@ -1549,8 +1814,26 @@ private fun ConversationHeader(
                     letterSpacing = 0.5.sp,
                 )
             }
-            IconButton(onClick = {}) {
+            IconButton(onClick = { menuExpanded = true }) {
                 Icon(Icons.Default.MoreVert, contentDescription = "Conversation options", tint = Muted)
+            }
+            DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+                DropdownMenuItem(
+                    text = { Text("Copy address") },
+                    onClick = {
+                        clipboard.setText(AnnotatedString(conversation.smsAddress.orEmpty()))
+                        menuExpanded = false
+                    },
+                )
+                if (conversation.threadId != null) {
+                    DropdownMenuItem(
+                        text = { Text("Delete conversation") },
+                        onClick = {
+                            menuExpanded = false
+                            onDeleteConversation()
+                        },
+                    )
+                }
             }
         }
         HorizontalDivider(color = accent.copy(alpha = 0.2f))
@@ -1561,6 +1844,7 @@ private fun ConversationHeader(
 private fun MessageBubble(
     message: DemoMessage,
     attachmentRevision: Int,
+    onLongPress: () -> Unit,
     onAttachment: (SecureAttachmentDescriptor) -> Unit,
 ) {
     val context = LocalContext.current
@@ -1576,7 +1860,9 @@ private fun MessageBubble(
         Toxic.copy(alpha = if (lightTheme) 0.11f else 0.16f)
     }
     Row(
-        modifier = Modifier.fillMaxWidth(),
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(onClick = {}, onLongClick = onLongPress),
         horizontalArrangement = if (message.outgoing) Arrangement.End else Arrangement.Start,
     ) {
         Column(
