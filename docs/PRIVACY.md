@@ -10,13 +10,14 @@ This repository document is the source draft for EutherPing's future public and 
 - Phone contacts, only after the separate Contacts permission is granted, to let the user search for message recipients and display local contact names.
 - A user-selected image or file, through Android's system document picker, when the user explicitly attaches it.
 - Local-network state and a local IP address when a verified Vessel sends or receives a direct encrypted attachment.
+- Already paired Bluetooth device names when the user enables the optional Nearby devices fallback. EutherPing does not request Bluetooth scanning or location.
 - Cryptographic identity keys created for Secure Ping and protected using Android Keystore.
 
 ## How the data is used
 
 SMS and MMS data is used to display, send, receive, and maintain the user's messaging history through Android's Telephony provider. Carrier SMS and MMS necessarily pass through the user's mobile operator and are not end-to-end encrypted by EutherPing.
 
-Secure Ping text is encrypted to a verified recipient before it is placed in carrier SMS. Secure attachment ciphertext is transferred directly over the local Wi-Fi network; its signed key and manifest are carried inside an encrypted Secure Ping SMS capsule. Phone numbers and carrier metadata remain visible to the mobile operator.
+Secure Ping text is encrypted to a verified recipient before it is placed in carrier SMS. Secure attachment ciphertext is transferred over direct local Wi-Fi or authenticated Bluetooth between already paired phones; its signed key and manifest are carried inside an encrypted Secure Ping SMS capsule. Phone numbers and carrier metadata remain visible to the mobile operator.
 
 Contacts stay on the device. EutherPing does not upload the address book. Selected carrier-MMS images are scaled locally before Android hands the MMS to the operator. Selected secure attachments are encrypted locally before transport.
 
@@ -24,15 +25,15 @@ Contacts stay on the device. EutherPing does not upload the address book. Select
 
 - Ordinary SMS and MMS history is stored in Android's system Telephony provider and follows Android's message deletion and device-retention behavior.
 - Secure Ping private keys and the sent-text display vault are stored in app-private storage protected by Android Keystore.
-- Secure attachment payloads remain encrypted in app-private storage. A plaintext viewing copy is created only when the user opens a verified file, scheduled for deletion after ten minutes, and cleared on the next app start.
+- Secure attachment payloads remain encrypted in app-private storage. An inline Vessel image preview uses a short-lived plaintext cache file that is deleted immediately after bounded decoding. Explicitly opening a verified file creates a plaintext viewing copy scheduled for deletion after ten minutes; remaining view-cache files are cleared on the next app start.
 - Temporary MMS transport PDU files are stored in private cache and deleted after completion or by Android cache management.
 - Android cloud backup and device transfer are disabled for the app.
 
 ## Collection, sharing, and remote services
 
-EutherPing 0.6.5 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. A private app file caches ordinary conversation previews and non-secret Vessel metadata for fast startup; decrypted Secure Ping text is deliberately replaced by a neutral placeholder in that index. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
+EutherPing 0.7.0 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. A private app file caches ordinary conversation previews and non-secret Vessel metadata for fast startup; decrypted Secure Ping text is deliberately replaced by a neutral placeholder in that index. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, to the intended paired phone as encrypted Bluetooth attachment ciphertext, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
 
-Direct local encrypted attachment transfer does not send data to an EutherPing backend. The peer receives ciphertext and can decrypt it only with the intended verified Vessel identity.
+Direct Wi-Fi and Bluetooth attachment transfer do not send data to an EutherPing backend. The peer receives ciphertext and can decrypt it only with the intended verified Vessel identity.
 
 ## Security and limitations
 

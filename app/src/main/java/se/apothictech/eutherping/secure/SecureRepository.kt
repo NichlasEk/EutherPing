@@ -72,9 +72,19 @@ data class SecureAttachmentDescriptor(
     val ciphertextSha256: String,
     val contentKey: ByteArray,
     val nonce: ByteArray,
-    val downloadUrl: String,
+    val downloadUrl: String?,
+    val transportToken: String,
+    val bluetoothAvailable: Boolean,
+    val bluetoothName: String?,
     val incoming: Boolean,
-)
+) {
+    val transportLabel: String
+        get() = when {
+            downloadUrl != null && bluetoothAvailable -> "DIRECT WIFI + BLUETOOTH"
+            bluetoothAvailable -> "BLUETOOTH"
+            else -> "DIRECT WIFI"
+        }
+}
 
 object SecureRepository {
     const val INVITE_PREFIX = "EP2I:"
@@ -265,6 +275,7 @@ object SecureRepository {
         val recipientFingerprint = checkNotNull(current.fingerprint)
         val senderFingerprint = identity(context).fingerprint
         val payload = JSONObject()
+            // Keep v1 for Wi-Fi interoperability with 0.6.x; Bluetooth fields are optional.
             .put("v", 1)
             .put("kind", "file")
             .put("id", descriptor.id)
@@ -279,7 +290,10 @@ object SecureRepository {
             .put("ch", descriptor.ciphertextSha256)
             .put("key", encode(descriptor.contentKey))
             .put("nonce", encode(descriptor.nonce))
-            .put("url", descriptor.downloadUrl)
+            .put("url", descriptor.downloadUrl ?: JSONObject.NULL)
+            .put("token", descriptor.transportToken)
+            .put("bt", descriptor.bluetoothAvailable)
+            .put("btn", descriptor.bluetoothName ?: JSONObject.NULL)
             .toString()
             .toByteArray(UTF_8)
         val signature = signingKeyset(context).getPrimitive(PublicKeySign::class.java).sign(payload)
@@ -344,7 +358,7 @@ object SecureRepository {
             .fold(
                 onSuccess = { attachment ->
                     SecureDecodedMessage(
-                        text = "📎 ${attachment.name} • ${formatAttachmentSize(attachment.plaintextSize)} • DIRECT WIFI",
+                        text = "📎 ${attachment.name} • ${formatAttachmentSize(attachment.plaintextSize)} • ${attachment.transportLabel}",
                         isSecure = true,
                         verified = peer(context, address).state == SecurePeerState.VERIFIED,
                         attachment = attachment,
@@ -437,7 +451,7 @@ object SecureRepository {
             stored.toByteArray(UTF_8)
         }
         val payload = JSONObject(String(payloadBytes, UTF_8))
-        check(payload.getInt("v") == 1)
+        check(payload.getInt("v") in 1..2)
         check(payload.getString("kind") == "file")
         check(payload.getString("id") == outer.getString("id"))
         attachmentDescriptor(payload, incoming)
@@ -507,6 +521,12 @@ object SecureRepository {
         val ciphertextHash = payload.getString("ch")
         val key = decode(payload.getString("key"))
         val nonce = decode(payload.getString("nonce"))
+        val downloadUrl = payload.optString("url").takeIf { it.isNotBlank() && it != "null" }
+        val bluetoothAvailable = payload.optBoolean("bt", false)
+        val transportToken = payload.optString("token").takeIf(String::isNotBlank)
+            ?: downloadUrl?.substringAfterLast('/')
+            ?: ""
+        val bluetoothName = payload.optString("btn").takeIf { it.isNotBlank() && it != "null" }
         require(id.matches(Regex("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")))
         require(name.isNotBlank() && name.length <= 180 && '/' !in name && '\\' !in name)
         require(mimeType.isNotBlank() && mimeType.length <= 120)
@@ -516,6 +536,11 @@ object SecureRepository {
         require(ciphertextHash.matches(Regex("[0-9a-f]{64}")))
         require(key.size == 32)
         require(nonce.size == 12)
+        require(downloadUrl != null || bluetoothAvailable) { "Attachment offer has no transport" }
+        require(transportToken.matches(Regex("[A-Za-z0-9_-]{32}"))) {
+            "Attachment transport token is malformed"
+        }
+        require(bluetoothName == null || bluetoothName.length <= 120)
         return SecureAttachmentDescriptor(
             id = id,
             name = name,
@@ -526,7 +551,10 @@ object SecureRepository {
             ciphertextSha256 = ciphertextHash,
             contentKey = key,
             nonce = nonce,
-            downloadUrl = payload.getString("url"),
+            downloadUrl = downloadUrl,
+            transportToken = transportToken,
+            bluetoothAvailable = bluetoothAvailable,
+            bluetoothName = bluetoothName,
             incoming = incoming,
         )
     }

@@ -4,6 +4,8 @@ import android.Manifest
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -51,6 +53,7 @@ object SecureAttachmentRepository {
 
     fun clearTransientPlaintext(context: Context) {
         File(context.cacheDir, "secure_attachment_view").listFiles()?.forEach(File::delete)
+        File(context.cacheDir, "secure_attachment_preview").listFiles()?.forEach(File::delete)
     }
 
     fun ensureServerStarted(context: Context): Result<Unit> = runCatching {
@@ -68,18 +71,10 @@ object SecureAttachmentRepository {
 
     fun prepareOutgoing(context: Context, address: String, uri: Uri): Result<PreparedSecureAttachment> =
         runCatching {
-            check(
-                ContextCompat.checkSelfPermission(context, Manifest.permission.INTERNET) ==
-                    PackageManager.PERMISSION_GRANTED,
-            ) {
-                "Local network access is blocked. On GrapheneOS, open Settings → Apps → EutherPing → " +
-                    "Permissions and enable Network, then keep both phones on the same Wi-Fi."
-            }
             val peer = SecureRepository.peer(context, address)
             check(peer.canEncrypt) {
                 "Verify the vessel before sending a file"
             }
-            ensureServerStarted(context).getOrThrow()
             val id = UUID.randomUUID().toString()
             val metadata = readMetadata(context, uri)
             require(metadata.size == null || metadata.size in 0..MAX_FILE_BYTES) {
@@ -128,6 +123,23 @@ object SecureAttachmentRepository {
                 throw error
             }
             val token = randomBytes(24).toUrlBase64()
+            val wifiResult = runCatching {
+                check(
+                    ContextCompat.checkSelfPermission(context, Manifest.permission.INTERNET) ==
+                        PackageManager.PERMISSION_GRANTED,
+                ) { "Local network access is blocked" }
+                ensureServerStarted(context).getOrThrow()
+                "http://${localIpv4Address(context)}:$SERVER_PORT/eutherping/$id/$token"
+            }
+            val bluetoothResult = BluetoothAttachmentTransport.ensureServerStarted(context)
+            val downloadUrl = wifiResult.getOrNull()
+            val bluetoothAvailable = bluetoothResult.isSuccess
+            check(downloadUrl != null || bluetoothAvailable) {
+                "No secure attachment transport is ready. Enable same-Wi-Fi Network access or grant " +
+                    "Nearby devices and pair both phones in Android Bluetooth settings. " +
+                    "Wi-Fi: ${wifiResult.exceptionOrNull()?.message}. " +
+                    "Bluetooth: ${bluetoothResult.exceptionOrNull()?.message}."
+            }
             registerTransfer(
                 context,
                 id,
@@ -145,7 +157,10 @@ object SecureAttachmentRepository {
                 ciphertextSha256 = sha256(encrypted),
                 contentKey = contentKey,
                 nonce = nonce,
-                downloadUrl = "http://${localIpv4Address(context)}:$SERVER_PORT/eutherping/$id/$token",
+                downloadUrl = downloadUrl,
+                transportToken = token,
+                bluetoothAvailable = bluetoothAvailable,
+                bluetoothName = BluetoothAttachmentTransport.localDeviceName(context),
                 incoming = false,
             )
             val wireBody = SecureRepository.encryptAttachmentOffer(context, address, descriptor)
@@ -176,6 +191,7 @@ object SecureAttachmentRepository {
         }
     }
 
+    @Synchronized
     fun downloadIncoming(
         context: Context,
         address: String,
@@ -190,62 +206,30 @@ object SecureAttachmentRepository {
             sha256(existing) == descriptor.ciphertextSha256
         ) return@runCatching existing
 
-        val url = java.net.URL(descriptor.downloadUrl)
-        require(url.protocol == "http") { "Secure attachment transport must use local HTTP" }
-        require(url.port == SERVER_PORT) { "Secure attachment endpoint uses an unexpected port" }
-        require(url.userInfo == null && url.query == null && url.ref == null) {
-            "Secure attachment endpoint is malformed"
-        }
-        val pathParts = url.path.split('/').filter(String::isNotBlank)
-        require(pathParts.size == 3 && pathParts[0] == "eutherping" && pathParts[1] == descriptor.id) {
-            "Secure attachment endpoint does not match its signed offer"
-        }
-        val token = pathParts[2]
-        require(token.matches(Regex("[A-Za-z0-9_-]{32}"))) { "Secure attachment token is malformed" }
-        require(url.host.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))) {
-            "Secure attachment endpoint must use a numeric local address"
-        }
-        val resolved = InetAddress.getByName(url.host)
-        require(resolved.isSiteLocalAddress || resolved.isLinkLocalAddress || resolved.isLoopbackAddress) {
-            "Attachment endpoint is not on the local network"
-        }
         val incomingDirectory = File(context.filesDir, "secure_attachments/incoming").apply { mkdirs() }
         val partial = File(incomingDirectory, "${descriptor.id}.partial")
         val encrypted = File(incomingDirectory, "${descriptor.id}.enc")
-        val connection = (url.openConnection() as HttpURLConnection).apply {
-            connectTimeout = 8_000
-            readTimeout = 30_000
-            instanceFollowRedirects = false
-            requestMethod = "GET"
-            setRequestProperty(
-                "X-EutherPing-Proof",
-                SecureRepository.signAttachmentRequest(
-                    context,
-                    descriptor.id,
-                    token,
-                ),
-            )
-        }
         try {
-            check(connection.responseCode == HttpURLConnection.HTTP_OK) {
-                "Direct Wi-Fi vessel is unavailable (${connection.responseCode})"
+            val failures = mutableListOf<Throwable>()
+            var downloaded = false
+            descriptor.downloadUrl?.let { url ->
+                downloadViaWifi(context, descriptor, url, partial).fold(
+                    onSuccess = { downloaded = true },
+                    onFailure = { failures += it },
+                )
             }
-            val digest = MessageDigest.getInstance("SHA-256")
-            var received = 0L
-            DigestInputStream(BufferedInputStream(connection.inputStream, BUFFER_SIZE), digest).use { input ->
-                BufferedOutputStream(partial.outputStream(), BUFFER_SIZE).use { output ->
-                    val buffer = ByteArray(BUFFER_SIZE)
-                    while (true) {
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        received += count
-                        require(received <= descriptor.ciphertextSize) { "Attachment exceeded signed size" }
-                        output.write(buffer, 0, count)
-                    }
-                }
+            if (!downloaded && descriptor.bluetoothAvailable) {
+                BluetoothAttachmentTransport.download(context, address, descriptor, partial).fold(
+                    onSuccess = { downloaded = true },
+                    onFailure = { failures += it },
+                )
             }
-            check(received == descriptor.ciphertextSize) { "Attachment was incomplete" }
-            check(digest.digest().toHex() == descriptor.ciphertextSha256) {
+            check(downloaded) {
+                failures.joinToString("; ") { it.message ?: it.javaClass.simpleName }
+                    .ifBlank { "No offered attachment transport is available" }
+            }
+            check(partial.length() == descriptor.ciphertextSize) { "Attachment was incomplete" }
+            check(sha256(partial) == descriptor.ciphertextSha256) {
                 "Encrypted attachment hash mismatch"
             }
             verifyPlaintext(descriptor, partial)
@@ -257,8 +241,6 @@ object SecureAttachmentRepository {
         } catch (error: Throwable) {
             partial.delete()
             throw error
-        } finally {
-            connection.disconnect()
         }
     }
 
@@ -266,8 +248,44 @@ object SecureAttachmentRepository {
         context.getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
             .getString(id, null)?.let(::File)?.takeIf(File::isFile)
 
+    private fun storedCiphertext(context: Context, descriptor: SecureAttachmentDescriptor): File? =
+        if (descriptor.incoming) {
+            downloadedCiphertext(context, descriptor.id)
+        } else {
+            File(context.filesDir, "secure_attachments/outgoing/${descriptor.id}.enc").takeIf(File::isFile)
+        }
+
+    internal fun isDisplayableImage(mimeType: String): Boolean =
+        mimeType.startsWith("image/", ignoreCase = true)
+
+    fun loadImagePreview(context: Context, descriptor: SecureAttachmentDescriptor): Result<Bitmap> = runCatching {
+        require(isDisplayableImage(descriptor.mimeType)) { "Attachment is not an image" }
+        val encrypted = storedCiphertext(context, descriptor)
+        checkNotNull(encrypted) { "Download the image first" }
+        val previewDirectory = File(context.cacheDir, "secure_attachment_preview").apply { mkdirs() }
+        val plaintext = File(previewDirectory, "${descriptor.id}-${System.nanoTime()}.preview")
+        try {
+            decryptToFile(descriptor, encrypted, plaintext)
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(plaintext.absolutePath, bounds)
+            check(bounds.outWidth > 0 && bounds.outHeight > 0) { "Attachment is not a supported image" }
+            var sampleSize = 1
+            while (bounds.outWidth / sampleSize > 1_600 || bounds.outHeight / sampleSize > 1_600) {
+                sampleSize *= 2
+            }
+            checkNotNull(
+                BitmapFactory.decodeFile(
+                    plaintext.absolutePath,
+                    BitmapFactory.Options().apply { inSampleSize = sampleSize },
+                ),
+            ) { "Could not decode the verified image" }
+        } finally {
+            plaintext.delete()
+        }
+    }
+
     fun openDownloaded(context: Context, descriptor: SecureAttachmentDescriptor): Result<Unit> = runCatching {
-        val encrypted = checkNotNull(downloadedCiphertext(context, descriptor.id)) {
+        val encrypted = checkNotNull(storedCiphertext(context, descriptor)) {
             "Download the attachment first"
         }
         val openDirectory = File(context.cacheDir, "secure_attachment_view").apply { mkdirs() }
@@ -294,6 +312,69 @@ object SecureAttachmentRepository {
             decryptToFile(descriptor, encrypted, verification)
         } finally {
             verification.delete()
+        }
+    }
+
+    private fun downloadViaWifi(
+        context: Context,
+        descriptor: SecureAttachmentDescriptor,
+        rawUrl: String,
+        partial: File,
+    ): Result<Unit> = runCatching {
+        val url = java.net.URL(rawUrl)
+        require(url.protocol == "http") { "Secure attachment transport must use local HTTP" }
+        require(url.port == SERVER_PORT) { "Secure attachment endpoint uses an unexpected port" }
+        require(url.userInfo == null && url.query == null && url.ref == null) {
+            "Secure attachment endpoint is malformed"
+        }
+        val pathParts = url.path.split('/').filter(String::isNotBlank)
+        require(
+            pathParts.size == 3 && pathParts[0] == "eutherping" &&
+                pathParts[1] == descriptor.id && pathParts[2] == descriptor.transportToken,
+        ) { "Secure attachment endpoint does not match its signed offer" }
+        require(url.host.matches(Regex("(?:[0-9]{1,3}\\.){3}[0-9]{1,3}"))) {
+            "Secure attachment endpoint must use a numeric local address"
+        }
+        val resolved = InetAddress.getByName(url.host)
+        require(resolved.isSiteLocalAddress || resolved.isLinkLocalAddress || resolved.isLoopbackAddress) {
+            "Attachment endpoint is not on the local network"
+        }
+        val connection = (url.openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8_000
+            readTimeout = 30_000
+            instanceFollowRedirects = false
+            requestMethod = "GET"
+            setRequestProperty(
+                "X-EutherPing-Proof",
+                SecureRepository.signAttachmentRequest(
+                    context,
+                    descriptor.id,
+                    descriptor.transportToken,
+                ),
+            )
+        }
+        try {
+            check(connection.responseCode == HttpURLConnection.HTTP_OK) {
+                "Direct Wi-Fi vessel is unavailable (${connection.responseCode})"
+            }
+            var received = 0L
+            BufferedInputStream(connection.inputStream, BUFFER_SIZE).use { input ->
+                BufferedOutputStream(partial.outputStream(), BUFFER_SIZE).use { output ->
+                    val buffer = ByteArray(BUFFER_SIZE)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        received += count
+                        require(received <= descriptor.ciphertextSize) {
+                            "Attachment exceeded signed size"
+                        }
+                        output.write(buffer, 0, count)
+                    }
+                }
+            }
+            check(received == descriptor.ciphertextSize) { "Attachment was incomplete" }
+        } finally {
+            connection.disconnect()
         }
     }
 
@@ -371,28 +452,9 @@ object SecureAttachmentRepository {
             if (parts.size != 3 || parts[0] != "eutherping") return respond(client, 404, "Not Found")
             val id = parts[1]
             val token = parts[2]
-            val raw = context.getSharedPreferences(SERVER_PREFS, Context.MODE_PRIVATE)
-                .getString(id, null) ?: return respond(client, 404, "Not Found")
-            val registration = runCatching { JSONObject(raw) }.getOrNull()
-                ?: return respond(client, 404, "Not Found")
-            val expectedToken = registration.optString("token").toByteArray(Charsets.UTF_8)
-            if (!MessageDigest.isEqual(expectedToken, token.toByteArray(Charsets.UTF_8))) {
-                return respond(client, 403, "Forbidden")
-            }
-            if (registration.optLong("expires", 0L) < System.currentTimeMillis()) {
-                File(registration.optString("path")).delete()
-                unregisterTransfer(context, id)
-                return respond(client, 410, "Gone")
-            }
-            val signingPublicKey = runCatching {
-                registration.optString("signing").fromUrlBase64()
-            }.getOrNull() ?: return respond(client, 403, "Forbidden")
             val proof = headers["x-eutherping-proof"].orEmpty()
-            if (!SecureRepository.verifyAttachmentRequest(signingPublicKey, id, token, proof)) {
-                return respond(client, 403, "Forbidden")
-            }
-            val file = File(registration.optString("path"))
-            if (!file.isFile) return respond(client, 410, "Gone")
+            val file = authorizedTransfer(context, id, token, proof)
+                ?: return respond(client, 403, "Forbidden")
             val output = BufferedOutputStream(client.getOutputStream(), BUFFER_SIZE)
             output.write(
                 ("HTTP/1.1 200 OK\r\n" +
@@ -435,6 +497,29 @@ object SecureAttachmentRepository {
 
     private fun unregisterTransfer(context: Context, id: String) {
         context.getSharedPreferences(SERVER_PREFS, Context.MODE_PRIVATE).edit().remove(id).apply()
+    }
+
+    internal fun authorizedTransfer(
+        context: Context,
+        id: String,
+        token: String,
+        proof: String,
+    ): File? {
+        val raw = context.getSharedPreferences(SERVER_PREFS, Context.MODE_PRIVATE)
+            .getString(id, null) ?: return null
+        val registration = runCatching { JSONObject(raw) }.getOrNull() ?: return null
+        val expectedToken = registration.optString("token").toByteArray(Charsets.UTF_8)
+        if (!MessageDigest.isEqual(expectedToken, token.toByteArray(Charsets.UTF_8))) return null
+        if (registration.optLong("expires", 0L) < System.currentTimeMillis()) {
+            File(registration.optString("path")).delete()
+            unregisterTransfer(context, id)
+            return null
+        }
+        val signingPublicKey = runCatching {
+            registration.optString("signing").fromUrlBase64()
+        }.getOrNull() ?: return null
+        if (!SecureRepository.verifyAttachmentRequest(signingPublicKey, id, token, proof)) return null
+        return File(registration.optString("path")).takeIf(File::isFile)
     }
 
     private fun localIpv4Address(context: Context): String {

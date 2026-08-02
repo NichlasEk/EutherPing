@@ -2,7 +2,7 @@
 
 Checked against Google Play and Android default-handler guidance on 2026-08-02. Policies change; re-check the official policy pages at submission time.
 
-## Already aligned in 0.6.5
+## Already aligned in 0.7.0
 
 - Messaging is the app's prominent core functionality, not a secondary permission use.
 - The app asks for Android's SMS role before requesting SMS permissions.
@@ -11,6 +11,7 @@ Checked against Google Play and Android default-handler guidance on 2026-08-02. 
 - Cloud backup and device transfer are disabled.
 - There are no ads, analytics, telemetry, developer accounts, or remote EutherPing message service.
 - Images and files are selected through Android's system picker; broad storage permissions are not requested.
+- Optional Bluetooth fallback requests Nearby devices only when the user enables it, uses already paired devices, and does not request Bluetooth scanning or location.
 - Third-party MMS code is Apache 2.0, pinned, non-transitive, and accompanied by packaged attribution and the complete license text.
 - Target SDK is 36.
 

@@ -35,6 +35,8 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -134,6 +136,7 @@ import se.apothictech.eutherping.contacts.PhoneContact
 import se.apothictech.eutherping.secure.SecurePeerState
 import se.apothictech.eutherping.secure.SecureAttachmentDescriptor
 import se.apothictech.eutherping.secure.SecureAttachmentRepository
+import se.apothictech.eutherping.secure.BluetoothAttachmentTransport
 import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.sms.CarrierMmsAttachment
 import se.apothictech.eutherping.sms.CarrierMmsRepository
@@ -347,6 +350,11 @@ class MainActivity : ComponentActivity() {
         SecureAttachmentRepository.ensureServerStarted(this).onFailure {
             Log.w("EutherPingAttachment", "Direct Wi-Fi attachment server is unavailable", it)
         }
+        if (BluetoothAttachmentTransport.hasPermission(this)) {
+            BluetoothAttachmentTransport.ensureServerStarted(this).onFailure {
+                Log.i("EutherPingAttachment", "Bluetooth attachment server is not ready", it)
+            }
+        }
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.BLACK),
@@ -372,6 +380,15 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         requestedAddress = intent.smsAddress()
         requestedSecureLane = intent.getBooleanExtra(EXTRA_SECURE_LANE, false)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (BluetoothAttachmentTransport.hasPermission(this)) {
+            BluetoothAttachmentTransport.ensureServerStarted(this).onFailure {
+                Log.i("EutherPingAttachment", "Bluetooth attachment server is not ready", it)
+            }
+        }
     }
 
     companion object {
@@ -824,7 +841,7 @@ private fun DeckHeader(
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.6.5",
+                "ACOUSTIC MESSAGE TERMINAL 0.7.0",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -1257,6 +1274,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var secureRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     var attachmentRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     var attachmentBusy by remember(conversation.smsAddress) { mutableStateOf(false) }
+    val automaticImageAttempts = remember(conversation.id) { mutableSetOf<String>() }
     var selectedMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var forwardingMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var deleteMessageCandidate by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
@@ -1355,7 +1373,9 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                 context,
                                 conversation.smsAddress.orEmpty(),
                                 prepared.wireBody,
-                            )
+                            ).map {
+                                "Encrypted attachment offered over ${prepared.descriptor.transportLabel.lowercase()}"
+                            }
                         }
                     } else {
                         CarrierMmsRepository.sendImage(
@@ -1363,20 +1383,16 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                             conversation.smsAddress.orEmpty(),
                             draft,
                             uri,
-                        )
+                        ).map { "Carrier MMS queued" }
                     }
                 }
                 attachmentBusy = false
-                result.onSuccess {
+                result.onSuccess { successMessage ->
                     if (!secureLane) draft = ""
                     attachmentRevision++
                     Toast.makeText(
                         context,
-                        if (secureLane) {
-                            "Encrypted attachment offered over direct Wi-Fi"
-                        } else {
-                            "Carrier MMS queued"
-                        },
+                        successMessage,
                         Toast.LENGTH_LONG,
                     ).show()
                 }.onFailure {
@@ -1529,14 +1545,20 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     MessageBubble(
                         message = message,
                         attachmentRevision = attachmentRevision,
+                        secureAddress = conversation.smsAddress.takeIf { secureLane },
+                        automaticImagesAllowed = securePeer?.state == SecurePeerState.VERIFIED,
+                        automaticImageAttempts = automaticImageAttempts,
                         onLongPress = { selectedMessage = message },
                         onAttachment = { descriptor ->
                             if (!descriptor.incoming) {
-                                Toast.makeText(
-                                    context,
-                                    "Encrypted payload is waiting on this device",
-                                    Toast.LENGTH_SHORT,
-                                ).show()
+                                SecureAttachmentRepository.openDownloaded(context, descriptor)
+                                    .onFailure { error ->
+                                        Toast.makeText(
+                                            context,
+                                            "Could not open encrypted attachment: ${error.message}",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
                             } else {
                                 attachmentBusy = true
                                 coroutineScope.launch {
@@ -1561,7 +1583,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                     }.onFailure { error ->
                                         Toast.makeText(
                                             context,
-                                            "Direct Wi-Fi download failed: ${error.message}",
+                                            "Secure attachment transfer failed: ${error.message}",
                                             Toast.LENGTH_LONG,
                                         ).show()
                                     }
@@ -1583,7 +1605,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 item {
                     Text(
                         if (secureLane) {
-                            "VESSEL CHANNEL // ENCRYPTED TEXT OVER SMS // ENCRYPTED FILES OVER DIRECT WIFI"
+                            "VESSEL CHANNEL // ENCRYPTED TEXT OVER SMS // FILES OVER WIFI OR BLUETOOTH"
                         } else if (isRealSms) {
                             "ANDROID TELEPHONY // ORDINARY CARRIER SMS + MMS // NOT ENCRYPTED"
                         } else {
@@ -1844,6 +1866,9 @@ private fun ConversationHeader(
 private fun MessageBubble(
     message: DemoMessage,
     attachmentRevision: Int,
+    secureAddress: String?,
+    automaticImagesAllowed: Boolean,
+    automaticImageAttempts: MutableSet<String>,
     onLongPress: () -> Unit,
     onAttachment: (SecureAttachmentDescriptor) -> Unit,
 ) {
@@ -1889,6 +1914,58 @@ private fun MessageBubble(
                 val downloaded = remember(attachment.id, attachmentRevision) {
                     SecureAttachmentRepository.downloadedCiphertext(context, attachment.id) != null
                 }
+                val secureImagePreview by produceState<Bitmap?>(
+                    initialValue = null,
+                    attachment.id,
+                    attachmentRevision,
+                    secureAddress,
+                    automaticImagesAllowed,
+                ) {
+                    if (secureAddress != null && automaticImagesAllowed &&
+                        SecureAttachmentRepository.isDisplayableImage(attachment.mimeType)
+                    ) {
+                        val stored = !attachment.incoming ||
+                            SecureAttachmentRepository.downloadedCiphertext(context, attachment.id) != null
+                        if (stored || automaticImageAttempts.add(attachment.id)) {
+                            val result = withContext(Dispatchers.IO) {
+                                runCatching {
+                                    if (attachment.incoming && !stored) {
+                                        SecureAttachmentRepository.downloadIncoming(
+                                            context,
+                                            secureAddress,
+                                            attachment,
+                                        ).getOrThrow()
+                                    }
+                                    SecureAttachmentRepository.loadImagePreview(context, attachment).getOrThrow()
+                                }
+                            }
+                            result.onSuccess { value = it }
+                                .onFailure { error ->
+                                    Log.w("EutherPingAttachment", "Automatic Vessel image preview failed", error)
+                                }
+                        }
+                    }
+                }
+                secureImagePreview?.let { bitmap ->
+                    DisposableEffect(bitmap) {
+                        onDispose { bitmap.recycle() }
+                    }
+                    Image(
+                        bitmap = bitmap.asImageBitmap(),
+                        contentDescription = "Decrypted Vessel image",
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .aspectRatio(
+                                (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
+                                    .coerceIn(0.72f, 1.8f),
+                            )
+                            .heightIn(max = 260.dp)
+                            .padding(top = 9.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onAttachment(attachment) },
+                    )
+                }
                 Button(
                     onClick = { onAttachment(attachment) },
                     colors = ButtonDefaults.buttonColors(
@@ -1899,9 +1976,9 @@ private fun MessageBubble(
                 ) {
                     Text(
                         when {
-                            !attachment.incoming -> "ENCRYPTED // WIFI READY"
-                            downloaded -> "OPEN VERIFIED FILE"
-                            else -> "DOWNLOAD OVER DIRECT WIFI"
+                            !attachment.incoming -> "OPEN VERIFIED FILE"
+                            downloaded || secureImagePreview != null -> "OPEN VERIFIED FILE"
+                            else -> "DOWNLOAD // ${attachment.transportLabel}"
                         },
                         fontFamily = FontFamily.Monospace,
                         fontSize = 9.sp,
@@ -2401,8 +2478,28 @@ private fun SystemScreen(
 ) {
     val context = LocalContext.current
     val secureIdentity = remember { SecureRepository.ensureIdentity(context) }
+    var bluetoothRevision by remember { mutableIntStateOf(0) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) bluetoothRevision++
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+    val bluetoothPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        bluetoothRevision++
+        if (BluetoothAttachmentTransport.hasPermission(context)) {
+            BluetoothAttachmentTransport.ensureServerStarted(context)
+        }
+    }
+    val bluetoothStatus = remember(bluetoothRevision) {
+        BluetoothAttachmentTransport.status(context)
+    }
     Column(
-        modifier = Modifier.fillMaxSize().padding(18.dp),
+        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(18.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         ThemePickerCard(appTheme = appTheme, onThemeChange = onThemeChange)
@@ -2432,6 +2529,26 @@ private fun SystemScreen(
                 },
                 onFailure = { "Secure Ping remains disabled: ${it.message}" },
             ),
+        )
+        SystemCard(
+            "BLUETOOTH VESSEL",
+            bluetoothStatus,
+            if (bluetoothStatus == "READY") Toxic else Amber,
+            "Optional fallback for encrypted Vessel attachments. Grant Nearby devices, then pair " +
+                "the two phones in Android Bluetooth settings. Only already paired devices are tried; " +
+                "message text and ordinary SMS never move to Bluetooth.",
+            actionLabel = if (!BluetoothAttachmentTransport.hasPermission(context)) {
+                "GRANT NEARBY DEVICES"
+            } else {
+                "OPEN BLUETOOTH SETTINGS"
+            },
+            onAction = {
+                if (!BluetoothAttachmentTransport.hasPermission(context)) {
+                    bluetoothPermissionLauncher.launch(BluetoothAttachmentTransport.runtimePermissions)
+                } else {
+                    context.startActivity(BluetoothAttachmentTransport.settingsIntent())
+                }
+            },
         )
         SystemCard(
             "LOCAL VAULT",

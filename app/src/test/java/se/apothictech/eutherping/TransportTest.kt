@@ -6,6 +6,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.secure.SecureAttachmentRepository
+import se.apothictech.eutherping.secure.SecureAttachmentDescriptor
 import java.net.SocketException
 
 class TransportTest {
@@ -32,4 +33,38 @@ class TransportTest {
         assertTrue(explained.message.orEmpty().contains("enable Network"))
         assertTrue(explained.message.orEmpty().contains("same Wi-Fi"))
     }
+
+    @Test
+    fun `attachment labels expose only transports present in signed offer`() {
+        assertEquals("DIRECT WIFI", descriptor(url = "http://192.168.1.2:39841/x", bluetooth = false).transportLabel)
+        assertEquals("BLUETOOTH", descriptor(url = null, bluetooth = true).transportLabel)
+        assertEquals(
+            "DIRECT WIFI + BLUETOOTH",
+            descriptor(url = "http://192.168.1.2:39841/x", bluetooth = true).transportLabel,
+        )
+    }
+
+    @Test
+    fun `only image attachments are eligible for inline vessel previews`() {
+        assertTrue(SecureAttachmentRepository.isDisplayableImage("image/jpeg"))
+        assertTrue(SecureAttachmentRepository.isDisplayableImage("IMAGE/PNG"))
+        assertFalse(SecureAttachmentRepository.isDisplayableImage("application/pdf"))
+    }
+
+    private fun descriptor(url: String?, bluetooth: Boolean) = SecureAttachmentDescriptor(
+        id = "00000000-0000-4000-8000-000000000000",
+        name = "test.bin",
+        mimeType = "application/octet-stream",
+        plaintextSize = 1,
+        plaintextSha256 = "0".repeat(64),
+        ciphertextSize = 17,
+        ciphertextSha256 = "1".repeat(64),
+        contentKey = ByteArray(32),
+        nonce = ByteArray(12),
+        downloadUrl = url,
+        transportToken = "a".repeat(32),
+        bluetoothAvailable = bluetooth,
+        bluetoothName = "Test phone",
+        incoming = true,
+    )
 }
