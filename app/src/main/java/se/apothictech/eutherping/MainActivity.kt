@@ -84,6 +84,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -464,8 +465,16 @@ private fun SignalDeck(
     val hasContactsPermission = remember(contactPermissionRevision) {
         ContactRepository.hasPermission(context)
     }
-    val phoneContacts = remember(hasContactsPermission, contactPermissionRevision) {
-        if (hasContactsPermission) ContactRepository.loadPhoneContacts(context) else emptyList()
+    val phoneContacts by produceState<List<PhoneContact>>(
+        initialValue = emptyList(),
+        hasContactsPermission,
+        contactPermissionRevision,
+    ) {
+        value = if (hasContactsPermission) {
+            withContext(Dispatchers.IO) { ContactRepository.loadPhoneContacts(context) }
+        } else {
+            emptyList()
+        }
     }
 
     fun openContactSearch() {
@@ -580,7 +589,7 @@ private fun DeckHeader(onSearch: (() -> Unit)?, searchDescription: String) {
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.6.0",
+                "ACOUSTIC MESSAGE TERMINAL 0.6.1",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -610,35 +619,42 @@ private fun SignalsScreen(
     val context = LocalContext.current
     var showNewSignal by rememberSaveable { mutableStateOf(false) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
-    val smsConversations = remember(realSmsReady, smsRevision, phoneContacts) {
-        if (realSmsReady) {
-            SmsRepository.loadThreads(context).mapNotNull { thread ->
-                val ordinaryMessages = SmsRepository.loadMessages(
-                    context = context,
-                    threadId = thread.threadId,
-                    address = thread.address,
-                ).filter { message ->
-                    message.isMms || SecureRepository.decodeForDisplay(
+    val smsConversations by produceState<List<Conversation>>(
+        initialValue = emptyList(),
+        realSmsReady,
+        smsRevision,
+        phoneContacts,
+    ) {
+        value = if (realSmsReady) {
+            withContext(Dispatchers.IO) {
+                SmsRepository.loadThreads(context).mapNotNull { thread ->
+                    val ordinaryMessages = SmsRepository.loadMessages(
                         context = context,
+                        threadId = thread.threadId,
                         address = thread.address,
-                        body = message.body,
-                        incoming = message.incoming,
-                    ) == null
+                    ).filter { message ->
+                        message.isMms || SecureRepository.decodeForDisplay(
+                            context = context,
+                            address = thread.address,
+                            body = message.body,
+                            incoming = message.incoming,
+                        ) == null
+                    }
+                    val latest = ordinaryMessages.lastOrNull() ?: return@mapNotNull null
+                    Conversation(
+                        id = (100_000L + thread.threadId).toInt(),
+                        name = ContactRepository.displayName(phoneContacts, thread.address) ?: thread.address,
+                        initials = ContactRepository.displayName(phoneContacts, thread.address)
+                            ?.let(::nameInitials) ?: addressInitials(thread.address),
+                        preview = latest.body,
+                        time = formatMessageTime(latest.timestamp),
+                        transport = Transport.SMS,
+                        unread = ordinaryMessages.count { it.incoming && !it.read },
+                        distance = "ANDROID TELEPHONY",
+                        smsAddress = thread.address,
+                        threadId = thread.threadId,
+                    )
                 }
-                val latest = ordinaryMessages.lastOrNull() ?: return@mapNotNull null
-                Conversation(
-                    id = (100_000L + thread.threadId).toInt(),
-                    name = ContactRepository.displayName(phoneContacts, thread.address) ?: thread.address,
-                    initials = ContactRepository.displayName(phoneContacts, thread.address)
-                        ?.let(::nameInitials) ?: addressInitials(thread.address),
-                    preview = latest.body,
-                    time = formatMessageTime(latest.timestamp),
-                    transport = Transport.SMS,
-                    unread = ordinaryMessages.count { it.incoming && !it.read },
-                    distance = "ANDROID TELEPHONY",
-                    smsAddress = thread.address,
-                    threadId = thread.threadId,
-                )
             }
         } else {
             emptyList()
@@ -994,35 +1010,38 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             null
         }
     }
-    val realMessages = remember(
+    val realMessages by produceState<List<DemoMessage>>(
+        initialValue = emptyList(),
         conversation.threadId,
         conversation.smsAddress,
         smsRevision,
         secureRevision,
         attachmentRevision,
     ) {
-        if (isRealSms) {
-            SmsRepository.loadMessages(
-                context = context,
-                threadId = conversation.threadId,
-                address = conversation.smsAddress.orEmpty(),
-            ).mapNotNull { message ->
-                val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
+        value = if (isRealSms) {
+            withContext(Dispatchers.IO) {
+                SmsRepository.loadMessages(
                     context = context,
+                    threadId = conversation.threadId,
                     address = conversation.smsAddress.orEmpty(),
-                    body = message.body,
-                    incoming = message.incoming,
-                )
-                if (secureLane != (decoded?.isSecure == true)) return@mapNotNull null
-                DemoMessage(
-                    id = message.id,
-                    text = decoded?.text ?: message.body,
-                    outgoing = !message.incoming,
-                    time = formatMessageTime(message.timestamp),
-                    transport = conversation.transport,
-                    attachment = decoded?.attachment,
-                    carrierMmsAttachment = message.mmsAttachment,
-                )
+                ).mapNotNull { message ->
+                    val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
+                        context = context,
+                        address = conversation.smsAddress.orEmpty(),
+                        body = message.body,
+                        incoming = message.incoming,
+                    )
+                    if (secureLane != (decoded?.isSecure == true)) return@mapNotNull null
+                    DemoMessage(
+                        id = message.id,
+                        text = decoded?.text ?: message.body,
+                        outgoing = !message.incoming,
+                        time = formatMessageTime(message.timestamp),
+                        transport = conversation.transport,
+                        attachment = decoded?.attachment,
+                        carrierMmsAttachment = message.mmsAttachment,
+                    )
+                }
             }
         } else {
             emptyList()
@@ -1752,40 +1771,50 @@ private fun VesselsScreen(
 ) {
     val context = LocalContext.current
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
-    val vessels = remember(realSmsReady, smsRevision, phoneContacts) {
-        if (!realSmsReady) return@remember emptyList()
-        SmsRepository.loadThreads(context).mapNotNull { thread ->
-            val peer = SecureRepository.peer(context, thread.address)
-            val secureMessages = SmsRepository.loadMessages(
-                context = context,
-                threadId = thread.threadId,
-                address = thread.address,
-            ).mapNotNull { message ->
-                val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
-                    context = context,
-                    address = thread.address,
-                    body = message.body,
-                    incoming = message.incoming,
-                )
-                if (decoded?.isSecure == true) message to decoded else null
+    val vessels by produceState<List<Conversation>>(
+        initialValue = emptyList(),
+        realSmsReady,
+        smsRevision,
+        phoneContacts,
+    ) {
+        value = if (!realSmsReady) {
+            emptyList()
+        } else {
+            withContext(Dispatchers.IO) {
+                SmsRepository.loadThreads(context).mapNotNull { thread ->
+                    val peer = SecureRepository.peer(context, thread.address)
+                    val secureMessages = SmsRepository.loadMessages(
+                        context = context,
+                        threadId = thread.threadId,
+                        address = thread.address,
+                    ).mapNotNull { message ->
+                        val decoded = if (message.isMms) null else SecureRepository.decodeForDisplay(
+                            context = context,
+                            address = thread.address,
+                            body = message.body,
+                            incoming = message.incoming,
+                        )
+                        if (decoded?.isSecure == true) message to decoded else null
+                    }
+                    if (peer.state == SecurePeerState.NONE && secureMessages.isEmpty()) {
+                        return@mapNotNull null
+                    }
+                    val latest = secureMessages.lastOrNull()
+                    val contactName = ContactRepository.displayName(phoneContacts, thread.address)
+                    Conversation(
+                        id = (200_000L + thread.threadId).toInt(),
+                        name = contactName ?: thread.address,
+                        initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
+                        preview = latest?.second?.text ?: securePeerPreview(peer.state),
+                        time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
+                        transport = Transport.SECURE,
+                        unread = secureMessages.count { (message) -> message.incoming && !message.read },
+                        distance = securePeerLabel(peer.state),
+                        smsAddress = thread.address,
+                        threadId = thread.threadId,
+                    )
+                }
             }
-            if (peer.state == SecurePeerState.NONE && secureMessages.isEmpty()) {
-                return@mapNotNull null
-            }
-            val latest = secureMessages.lastOrNull()
-            val contactName = ContactRepository.displayName(phoneContacts, thread.address)
-            Conversation(
-                id = (200_000L + thread.threadId).toInt(),
-                name = contactName ?: thread.address,
-                initials = contactName?.let(::nameInitials) ?: addressInitials(thread.address),
-                preview = latest?.second?.text ?: securePeerPreview(peer.state),
-                time = formatMessageTime(latest?.first?.timestamp ?: thread.timestamp),
-                transport = Transport.SECURE,
-                unread = secureMessages.count { (message) -> message.incoming && !message.read },
-                distance = securePeerLabel(peer.state),
-                smsAddress = thread.address,
-                threadId = thread.threadId,
-            )
         }
     }
     LazyColumn(
