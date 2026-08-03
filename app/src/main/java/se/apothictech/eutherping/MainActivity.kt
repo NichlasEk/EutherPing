@@ -490,6 +490,12 @@ private fun EutherPingApp(
     val hasSmsPermissions = remember(setupRevision) { SmsRepository.hasSmsPermissions(context) }
     val smsRevision = rememberSmsRevision(isDefaultSmsApp && hasSmsPermissions)
 
+    LaunchedEffect(isDefaultSmsApp, hasSmsPermissions) {
+        if (isDefaultSmsApp && !hasSmsPermissions) {
+            permissionsLauncher.launch(SmsRepository.requiredPermissions)
+        }
+    }
+
     fun requestSmsSetup() {
         if (!SmsRepository.isDefaultSmsApp(context)) {
             val request = if (Build.VERSION.SDK_INT >= 29) {
@@ -1474,31 +1480,36 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         if (uri != null && isRealSms && (!secureLane || securePeer?.canEncrypt == true)) {
             attachmentBusy = true
             coroutineScope.launch {
-                val result = withContext(Dispatchers.IO) {
-                    if (secureLane) {
-                        SecureAttachmentRepository.prepareOutgoing(
-                            context,
-                            conversation.smsAddress.orEmpty(),
-                            uri,
-                        ).flatMap { prepared ->
-                            SmsRepository.sendText(
+                val result = try {
+                    withContext(Dispatchers.IO) {
+                        if (secureLane) {
+                            SecureAttachmentRepository.prepareOutgoing(
                                 context,
                                 conversation.smsAddress.orEmpty(),
-                                prepared.wireBody,
-                            ).map {
-                                "Encrypted attachment offered over ${prepared.descriptor.transportLabel.lowercase()}"
+                                uri,
+                            ).flatMap { prepared ->
+                                SmsRepository.sendText(
+                                    context,
+                                    conversation.smsAddress.orEmpty(),
+                                    prepared.wireBody,
+                                ).map {
+                                    "Encrypted attachment offered over ${prepared.descriptor.transportLabel.lowercase()}"
+                                }
                             }
+                        } else {
+                            CarrierMmsRepository.sendImage(
+                                context,
+                                conversation.smsAddress.orEmpty(),
+                                draft,
+                                uri,
+                            ).map { "Carrier MMS queued" }
                         }
-                    } else {
-                        CarrierMmsRepository.sendImage(
-                            context,
-                            conversation.smsAddress.orEmpty(),
-                            draft,
-                            uri,
-                        ).map { "Carrier MMS queued" }
                     }
+                } catch (error: Throwable) {
+                    Result.failure(error)
+                } finally {
+                    attachmentBusy = false
                 }
-                attachmentBusy = false
                 result.onSuccess { successMessage ->
                     if (!secureLane) draft = ""
                     attachmentRevision++
@@ -2729,7 +2740,7 @@ private fun SystemScreen(
             if (isDefaultSmsApp && hasSmsPermissions) Toxic else Amber,
             when {
                 !isDefaultSmsApp -> "Select EutherPing as Android's default SMS handler to connect the carrier channel."
-                !hasSmsPermissions -> "The SMS role is active. Grant read, receive, send and write access to continue."
+                !hasSmsPermissions -> "The SMS role is active. Grant SMS, MMS and WAP-push access to continue."
                 else -> "Live Android Telephony SMS and MMS transport is connected."
             },
             actionLabel = if (isDefaultSmsApp) "GRANT ACCESS" else "CONNECT SMS",

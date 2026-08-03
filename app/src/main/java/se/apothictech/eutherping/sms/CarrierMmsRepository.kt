@@ -10,7 +10,9 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Build
 import android.provider.Telephony
+import android.telephony.SubscriptionManager
 import android.telephony.SmsManager
+import android.util.Log
 import androidx.core.content.FileProvider
 import com.google.android.mms.pdu_alt.EncodedStringValue
 import com.google.android.mms.pdu_alt.NotificationInd
@@ -24,13 +26,16 @@ import com.google.android.mms.pdu_alt.SendReq
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
+import kotlin.math.sqrt
 
 object CarrierMmsRepository {
     const val ACTION_MMS_SENT = "se.apothictech.eutherping.MMS_SENT"
     const val EXTRA_MMS_URI = "mms_uri"
     private const val MMS_CACHE = "mms_transport"
     private const val MMS_VIEW_CACHE = "mms_view"
-    private const val MAX_SOURCE_BYTES = 25L * 1024 * 1024
+    private const val MAX_SOURCE_BYTES = 100L * 1024 * 1024
+    private const val MAX_DECODED_DIMENSION = 2_560
+    private const val MIN_SCALED_DIMENSION = 320
 
     fun loadPreview(context: Context, attachment: CarrierMmsAttachment): Result<Bitmap> = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -101,7 +106,14 @@ object CarrierMmsRepository {
         }
 
         val manager = smsManager(context)
-        val image = encodeCarrierImage(context, source, carrierPayloadLimit(manager))
+        val captionBytes = caption.trim().toByteArray(Charsets.UTF_8)
+        val payloadLimit = carrierPayloadLimit(manager)
+        require(captionBytes.size < payloadLimit - 8_192) { "The MMS caption is too large" }
+        val image = encodeCarrierImage(
+            context,
+            source,
+            payloadLimit - captionBytes.size - 8_192,
+        )
         val request = SendReq().apply {
             setTo(arrayOf(EncodedStringValue(address)))
             setDate(System.currentTimeMillis() / 1000L)
@@ -114,7 +126,7 @@ object CarrierMmsRepository {
                 if (caption.isNotBlank()) addPart(textPart(caption.trim()))
                 addPart(imagePart(image))
             })
-            setMessageSize(image.bytes.size.toLong() + caption.toByteArray().size)
+            setMessageSize(image.bytes.size.toLong() + captionBytes.size)
         }
         val messageUri = PduPersister.getPduPersister(context).persist(
             request,
@@ -152,7 +164,12 @@ object CarrierMmsRepository {
         val raw = checkNotNull(intent.getByteArrayExtra("data")) { "MMS notification had no PDU" }
         val notification = PduParser(raw).parse() as? NotificationInd
             ?: error("Unsupported MMS push type")
-        val manager = smsManager(context, intent.subscriptionId())
+        val manager = smsManager(
+            context,
+            intent.subscriptionId(),
+            allowDataSubscriptionFallback = true,
+        )
+        Log.i("EutherPingMms", "Starting carrier MMS download on subscription ${manager.subscriptionId}")
         var location = String(checkNotNull(notification.contentLocation), Charsets.ISO_8859_1)
         if (manager.carrierConfigValues?.getBoolean(SmsManager.MMS_CONFIG_APPEND_TRANSACTION_ID) == true &&
             location.endsWith("=")
@@ -202,32 +219,67 @@ object CarrierMmsRepository {
     private fun encodeCarrierImage(context: Context, uri: Uri, limit: Int): EncodedImage {
         val declaredSize = context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
         require(declaredSize == null || declaredSize < 0 || declaredSize <= MAX_SOURCE_BYTES) {
-            "The selected image is larger than 25 MB"
+            "The selected image is larger than 100 MB"
         }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         context.contentResolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
         require(bounds.outWidth > 0 && bounds.outHeight > 0) { "The selected image could not be decoded" }
         var sample = 1
-        while (bounds.outWidth / sample > 2048 || bounds.outHeight / sample > 2048) sample *= 2
+        while (
+            bounds.outWidth / sample > MAX_DECODED_DIMENSION ||
+            bounds.outHeight / sample > MAX_DECODED_DIMENSION
+        ) sample *= 2
         val bitmap = checkNotNull(
             context.contentResolver.openInputStream(uri)?.use {
                 BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample })
             },
         ) { "The selected image could not be decoded" }
         try {
-            var quality = 90
-            var bytes: ByteArray
-            do {
-                bytes = ByteArrayOutputStream().use { output ->
-                    bitmap.compress(Bitmap.CompressFormat.JPEG, quality, output)
-                    output.toByteArray()
-                }
-                quality -= 10
-            } while (bytes.size > limit && quality >= 40)
-            require(bytes.size <= limit) { "The image is too large for this carrier's MMS limit" }
-            return EncodedImage(bytes, "eutherping-${System.currentTimeMillis()}.jpg")
+            return EncodedImage(
+                encodeBitmapForMms(bitmap, limit),
+                "eutherping-${System.currentTimeMillis()}.jpg",
+            )
         } finally {
             bitmap.recycle()
+        }
+    }
+
+    internal fun encodeBitmapForMms(source: Bitmap, limit: Int): ByteArray {
+        require(limit >= 64 * 1024) { "The carrier MMS limit is too small" }
+        var working = source
+        var ownsWorking = false
+        try {
+            repeat(10) {
+                var smallest: ByteArray? = null
+                for (quality in intArrayOf(88, 80, 72, 64, 56, 48, 40)) {
+                    val encoded = ByteArrayOutputStream().use { output ->
+                        check(working.compress(Bitmap.CompressFormat.JPEG, quality, output)) {
+                            "The selected image could not be encoded"
+                        }
+                        output.toByteArray()
+                    }
+                    if (encoded.size <= limit) return encoded
+                    smallest = encoded
+                }
+
+                val lowQualitySize = checkNotNull(smallest).size
+                val scale = (sqrt(limit.toDouble() / lowQualitySize) * 0.9).coerceIn(0.5, 0.85)
+                check(maxOf(working.width, working.height) > MIN_SCALED_DIMENSION) {
+                    "The image could not be reduced to this carrier's MMS limit"
+                }
+                val width = (working.width * scale).toInt().coerceAtLeast(1)
+                val height = (working.height * scale).toInt().coerceAtLeast(1)
+                check(width < working.width || height < working.height) {
+                    "The image could not be reduced to this carrier's MMS limit"
+                }
+                val scaled = Bitmap.createScaledBitmap(working, width, height, true)
+                if (ownsWorking) working.recycle()
+                working = scaled
+                ownsWorking = true
+            }
+            error("The image could not be reduced to this carrier's MMS limit")
+        } finally {
+            if (ownsWorking) working.recycle()
         }
     }
 
@@ -255,13 +307,21 @@ object CarrierMmsRepository {
     }
 
     @Suppress("DEPRECATION")
-    private fun smsManager(context: Context, subscriptionId: Int? = null): SmsManager {
+    private fun smsManager(
+        context: Context,
+        subscriptionId: Int? = null,
+        allowDataSubscriptionFallback: Boolean = false,
+    ): SmsManager {
         val base = if (Build.VERSION.SDK_INT >= 31) {
             checkNotNull(context.getSystemService(SmsManager::class.java)) { "SMS service is unavailable" }
         } else {
             SmsManager.getDefault()
         }
-        val id = subscriptionId ?: SmsManager.getDefaultSmsSubscriptionId()
+        val id = listOfNotNull(
+            subscriptionId,
+            SmsManager.getDefaultSmsSubscriptionId(),
+            SubscriptionManager.getDefaultDataSubscriptionId().takeIf { allowDataSubscriptionFallback },
+        ).firstOrNull { it >= 0 } ?: -1
         return when {
             id < 0 -> base
             Build.VERSION.SDK_INT >= 31 -> base.createForSubscriptionId(id)
@@ -269,10 +329,12 @@ object CarrierMmsRepository {
         }
     }
 
-    private fun Intent.subscriptionId(): Int? {
+    internal fun Intent.subscriptionId(): Int? {
         val candidates = listOf(
             "android.telephony.extra.SUBSCRIPTION_INDEX",
             "subscription",
+            "subscriptionId",
+            "subId",
             "sub_id",
         )
         return candidates.firstNotNullOfOrNull { key ->

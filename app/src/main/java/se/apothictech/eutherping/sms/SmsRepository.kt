@@ -78,6 +78,8 @@ object SmsRepository {
     val requiredPermissions = buildList {
         add(Manifest.permission.READ_SMS)
         add(Manifest.permission.RECEIVE_SMS)
+        add(Manifest.permission.RECEIVE_MMS)
+        add(Manifest.permission.RECEIVE_WAP_PUSH)
         add(Manifest.permission.SEND_SMS)
         if (Build.VERSION.SDK_INT >= 33) add("android.permission.POST_NOTIFICATIONS")
     }.toTypedArray()
