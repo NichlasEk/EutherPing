@@ -1,6 +1,8 @@
 package se.apothictech.eutherping.sms
 
 import android.Manifest
+import android.app.Notification
+import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
@@ -19,6 +21,30 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class CarrierMmsRepositoryTest {
+    @Test
+    fun postsCarrierMmsNotification() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancelAll()
+
+        IncomingMessageNotifier.show(
+            context,
+            "+46701234567",
+            "Carrier MMS received",
+            secureLane = false,
+        )
+
+        val notification = manager.activeNotifications
+            .firstOrNull { it.id == "+46701234567".hashCode() }
+            ?.notification
+        assertNotNull("Carrier MMS notification was not posted", notification)
+        assertTrue(
+            "Carrier MMS notification text was incorrect",
+            notification!!.extras.getCharSequence(Notification.EXTRA_TEXT) == "Carrier MMS received",
+        )
+        manager.cancel("+46701234567".hashCode())
+    }
+
     @Test
     fun downloadedReceiverDoesNotUseLegacyMmsConfigPath() {
         assertFalse(

@@ -206,6 +206,7 @@ object CarrierMmsRepository {
         file: File,
         contentLocation: String?,
         subscriptionId: Int,
+        notifyUser: Boolean = true,
     ): Result<Uri> = runCatching {
         require(file.isFile) { "The downloaded MMS payload is missing" }
         require(file.length() in 1..MAX_SOURCE_BYTES) { "The downloaded MMS payload has an invalid size" }
@@ -253,6 +254,19 @@ object CarrierMmsRepository {
             },
         )
         context.sendBroadcast(Intent(SmsRepository.ACTION_SMS_CHANGED).setPackage(context.packageName))
+        if (notifyUser && existing == null) {
+            val address = retrieved.from?.string
+                ?.substringBefore("/TYPE=")
+                ?.trim()
+                .orEmpty()
+                .ifBlank { "Unknown sender" }
+            IncomingMessageNotifier.show(
+                context = context,
+                address = address,
+                body = "Carrier MMS received",
+                secureLane = false,
+            )
+        }
         messageUri
     }
 
@@ -264,7 +278,7 @@ object CarrierMmsRepository {
             .orEmpty()
         var recovered = 0
         pending.forEach { file ->
-            persistDownloadedMms(context, file, null, subscriptionId).fold(
+            persistDownloadedMms(context, file, null, subscriptionId, notifyUser = false).fold(
                 onSuccess = { recovered++ },
                 onFailure = { Log.e("EutherPingMms", "Could not recover cached carrier MMS ${file.name}", it) },
             )
