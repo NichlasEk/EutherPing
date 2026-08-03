@@ -10,6 +10,7 @@ import androidx.core.content.ContextCompat
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -18,6 +19,15 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class CarrierMmsRepositoryTest {
+    @Test
+    fun downloadedReceiverDoesNotUseLegacyMmsConfigPath() {
+        assertFalse(
+            "Incoming MMS must not use the legacy receiver that crashes on Samsung Android 16",
+            com.klinker.android.send_message.MmsReceivedReceiver::class.java
+                .isAssignableFrom(MmsDownloadedReceiver::class.java),
+        )
+    }
+
     @Test
     fun readsSamsungStyleSubscriptionIdExtra() {
         val intent = Intent().putExtra("subscriptionId", 42)

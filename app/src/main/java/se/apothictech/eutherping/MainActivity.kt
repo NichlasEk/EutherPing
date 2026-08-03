@@ -493,6 +493,8 @@ private fun EutherPingApp(
     LaunchedEffect(isDefaultSmsApp, hasSmsPermissions) {
         if (isDefaultSmsApp && !hasSmsPermissions) {
             permissionsLauncher.launch(SmsRepository.requiredPermissions)
+        } else if (isDefaultSmsApp && hasSmsPermissions) {
+            withContext(Dispatchers.IO) { CarrierMmsRepository.recoverPendingDownloads(context) }
         }
     }
 

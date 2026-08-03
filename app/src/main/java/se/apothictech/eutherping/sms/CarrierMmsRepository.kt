@@ -22,6 +22,7 @@ import com.google.android.mms.pdu_alt.PduHeaders
 import com.google.android.mms.pdu_alt.PduParser
 import com.google.android.mms.pdu_alt.PduPart
 import com.google.android.mms.pdu_alt.PduPersister
+import com.google.android.mms.pdu_alt.RetrieveConf
 import com.google.android.mms.pdu_alt.SendReq
 import java.io.ByteArrayOutputStream
 import java.io.File
@@ -31,6 +32,9 @@ import kotlin.math.sqrt
 object CarrierMmsRepository {
     const val ACTION_MMS_SENT = "se.apothictech.eutherping.MMS_SENT"
     const val EXTRA_MMS_URI = "mms_uri"
+    const val EXTRA_DOWNLOADED_FILE = "file_path"
+    const val EXTRA_CONTENT_LOCATION = "location_url"
+    const val EXTRA_SUBSCRIPTION_ID = "subscription_id"
     private const val MMS_CACHE = "mms_transport"
     private const val MMS_VIEW_CACHE = "mms_view"
     private const val MAX_SOURCE_BYTES = 100L * 1024 * 1024
@@ -184,9 +188,9 @@ object CarrierMmsRepository {
             destination,
         )
         val resultIntent = Intent(context, MmsDownloadedReceiver::class.java).apply {
-            putExtra(com.klinker.android.send_message.MmsReceivedReceiver.EXTRA_FILE_PATH, destination.absolutePath)
-            putExtra(com.klinker.android.send_message.MmsReceivedReceiver.EXTRA_LOCATION_URL, location)
-            putExtra(com.klinker.android.send_message.MmsReceivedReceiver.SUBSCRIPTION_ID, manager.subscriptionId)
+            putExtra(EXTRA_DOWNLOADED_FILE, destination.absolutePath)
+            putExtra(EXTRA_CONTENT_LOCATION, location)
+            putExtra(EXTRA_SUBSCRIPTION_ID, manager.subscriptionId)
         }
         val pending = PendingIntent.getBroadcast(
             context,
@@ -196,6 +200,93 @@ object CarrierMmsRepository {
         )
         manager.downloadMultimediaMessage(context, location, contentUri, null, pending)
     }
+
+    fun persistDownloadedMms(
+        context: Context,
+        file: File,
+        contentLocation: String?,
+        subscriptionId: Int,
+    ): Result<Uri> = runCatching {
+        require(file.isFile) { "The downloaded MMS payload is missing" }
+        require(file.length() in 1..MAX_SOURCE_BYTES) { "The downloaded MMS payload has an invalid size" }
+        val response = file.readBytes()
+        val retrieved = sequenceOf(true, false).firstNotNullOfOrNull { parseContentDisposition ->
+            runCatching {
+                PduParser(response, parseContentDisposition).parse() as? RetrieveConf
+            }.getOrNull()
+        } ?: error("The downloaded carrier response was not a valid MMS")
+
+        val messageId = retrieved.messageId?.let { String(it, Charsets.ISO_8859_1) }
+        val existing = messageId?.let { findMmsByMessageId(context, it) }
+        val messageUri = existing ?: PduPersister.getPduPersister(context).persist(
+            retrieved,
+            Telephony.Mms.Inbox.CONTENT_URI,
+            true,
+            true,
+            null,
+            subscriptionId,
+        )
+        if (existing == null) {
+            val values = ContentValues().apply {
+                put(Telephony.Mms.DATE, System.currentTimeMillis() / 1_000L)
+                put(Telephony.Mms.DATE_SENT, retrieved.date)
+                put(Telephony.Mms.READ, 0)
+                put(Telephony.Mms.SEEN, 0)
+                if (subscriptionId >= 0) put(Telephony.Mms.SUBSCRIPTION_ID, subscriptionId)
+            }
+            context.contentResolver.update(messageUri, values, null, null)
+        }
+        if (!contentLocation.isNullOrBlank()) {
+            context.contentResolver.delete(
+                Telephony.Mms.CONTENT_URI,
+                "${Telephony.Mms.MESSAGE_TYPE}=? AND ${Telephony.Mms.CONTENT_LOCATION}=?",
+                arrayOf(PduHeaders.MESSAGE_TYPE_NOTIFICATION_IND.toString(), contentLocation),
+            )
+        }
+        check(file.delete() || !file.exists()) { "The downloaded MMS temporary file could not be removed" }
+        Log.i(
+            "EutherPingMms",
+            if (existing == null) {
+                "Carrier MMS parsed and stored at $messageUri"
+            } else {
+                "Carrier MMS was already stored at $messageUri"
+            },
+        )
+        context.sendBroadcast(Intent(SmsRepository.ACTION_SMS_CHANGED).setPackage(context.packageName))
+        messageUri
+    }
+
+    fun recoverPendingDownloads(context: Context): Int {
+        if (!SmsRepository.isDefaultSmsApp(context) || !SmsRepository.hasSmsPermissions(context)) return 0
+        val subscriptionId = smsManager(context, allowDataSubscriptionFallback = true).subscriptionId
+        val pending = File(context.cacheDir, MMS_CACHE)
+            .listFiles { file -> file.isFile && file.name.startsWith("receive-") && file.extension == "pdu" }
+            .orEmpty()
+        var recovered = 0
+        pending.forEach { file ->
+            persistDownloadedMms(context, file, null, subscriptionId).fold(
+                onSuccess = { recovered++ },
+                onFailure = { Log.e("EutherPingMms", "Could not recover cached carrier MMS ${file.name}", it) },
+            )
+        }
+        if (recovered > 0) Log.i("EutherPingMms", "Recovered $recovered cached carrier MMS message(s)")
+        return recovered
+    }
+
+    private fun findMmsByMessageId(context: Context, messageId: String): Uri? =
+        context.contentResolver.query(
+            Telephony.Mms.CONTENT_URI,
+            arrayOf(Telephony.Mms._ID),
+            "${Telephony.Mms.MESSAGE_ID}=?",
+            arrayOf(messageId),
+            "${Telephony.Mms.DATE} DESC",
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) {
+                android.content.ContentUris.withAppendedId(Telephony.Mms.CONTENT_URI, cursor.getLong(0))
+            } else {
+                null
+            }
+        }
 
     fun updateSentState(context: Context, rawUri: String, resultCode: Int) {
         if (!SmsRepository.isDefaultSmsApp(context)) return
