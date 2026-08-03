@@ -69,5 +69,13 @@ class CarrierMmsRepositoryTest {
             "Temporary MMS view copy was empty",
             context.contentResolver.openInputStream(viewUri)?.use { it.read() >= 0 } == true,
         )
+        val savedFile = File(context.cacheDir, "mms_view/instrumentation-saved.jpg")
+        val savedUri = FileProvider.getUriForFile(
+            context,
+            "${context.packageName}.securefiles",
+            savedFile,
+        )
+        CarrierMmsRepository.saveStoredImage(context, attachment, savedUri).getOrThrow()
+        assertTrue("Saved MMS image was empty", savedFile.length() > 0L)
     }
 }

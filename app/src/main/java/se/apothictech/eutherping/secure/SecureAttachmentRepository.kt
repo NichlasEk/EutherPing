@@ -306,6 +306,30 @@ object SecureAttachmentRepository {
         )
     }
 
+    fun saveDownloadedImage(
+        context: Context,
+        descriptor: SecureAttachmentDescriptor,
+        destination: Uri,
+    ): Result<Unit> = runCatching {
+        require(isDisplayableImage(descriptor.mimeType)) { "Attachment is not an image" }
+        val encrypted = checkNotNull(storedCiphertext(context, descriptor)) {
+            "Download the image first"
+        }
+        val saveDirectory = File(context.cacheDir, "secure_attachment_save").apply { mkdirs() }
+        saveDirectory.listFiles()?.forEach(File::delete)
+        val plaintext = File(saveDirectory, "${descriptor.id}.save")
+        try {
+            decryptToFile(descriptor, encrypted, plaintext)
+            plaintext.inputStream().use { input ->
+                checkNotNull(context.contentResolver.openOutputStream(destination, "w")) {
+                    "The selected destination could not be opened"
+                }.use(input::copyTo)
+            }
+        } finally {
+            plaintext.delete()
+        }
+    }
+
     private fun verifyPlaintext(descriptor: SecureAttachmentDescriptor, encrypted: File) {
         val verification = File(encrypted.parentFile, "${descriptor.id}.verify")
         try {

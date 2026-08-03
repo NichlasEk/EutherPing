@@ -73,6 +73,20 @@ object CarrierMmsRepository {
         )
     }
 
+    fun saveStoredImage(
+        context: Context,
+        attachment: CarrierMmsAttachment,
+        destination: Uri,
+    ): Result<Unit> = runCatching {
+        checkNotNull(context.contentResolver.openInputStream(attachment.uri)) {
+            "MMS image is no longer available from Android"
+        }.use { input ->
+            checkNotNull(context.contentResolver.openOutputStream(destination, "w")) {
+                "The selected destination could not be opened"
+            }.use(input::copyTo)
+        }
+    }
+
     fun sendImage(
         context: Context,
         address: String,

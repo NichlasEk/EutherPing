@@ -119,8 +119,14 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import java.time.LocalTime
@@ -217,6 +223,24 @@ private data class DemoMessage(
     val wireBody: String = text,
     val isMms: Boolean = false,
 )
+
+private sealed interface ImageActionTarget {
+    val suggestedName: String
+
+    data class Secure(val descriptor: SecureAttachmentDescriptor) : ImageActionTarget {
+        override val suggestedName: String = descriptor.name
+    }
+
+    data class Carrier(val attachment: CarrierMmsAttachment) : ImageActionTarget {
+        override val suggestedName: String = attachment.name
+    }
+}
+
+private fun safeImageName(name: String): String = name
+    .substringAfterLast('/')
+    .substringAfterLast('\\')
+    .replace(Regex("[^A-Za-z0-9._ -]"), "_")
+    .ifBlank { "EutherPing-image" }
 
 private data class DeckHistory(
     val signals: List<Conversation> = emptyList(),
@@ -875,7 +899,7 @@ private fun DeckHeader(
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.7.1",
+                "ACOUSTIC MESSAGE TERMINAL ${BuildConfig.VERSION_NAME}",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -1310,6 +1334,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var attachmentBusy by remember(conversation.smsAddress) { mutableStateOf(false) }
     val automaticImageAttempts = remember(conversation.id) { mutableSetOf<String>() }
     var selectedMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
+    var selectedImageAction by remember(conversation.id) { mutableStateOf<ImageActionTarget?>(null) }
+    var pendingImageSave by remember(conversation.id) { mutableStateOf<ImageActionTarget?>(null) }
     var forwardingMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var deleteMessageCandidate by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var showDeleteConversation by remember(conversation.id) { mutableStateOf(false) }
@@ -1330,6 +1356,33 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             SecureRepository.peer(context, conversation.smsAddress.orEmpty())
         } else {
             null
+        }
+    }
+    val imageSavePicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/*")) { uri ->
+        val target = pendingImageSave
+        pendingImageSave = null
+        if (uri != null && target != null) {
+            coroutineScope.launch {
+                val result = withContext(Dispatchers.IO) {
+                    when (target) {
+                        is ImageActionTarget.Secure -> SecureAttachmentRepository.saveDownloadedImage(
+                            context,
+                            target.descriptor,
+                            uri,
+                        )
+                        is ImageActionTarget.Carrier -> CarrierMmsRepository.saveStoredImage(
+                            context,
+                            target.attachment,
+                            uri,
+                        )
+                    }
+                }
+                result.onSuccess {
+                    Toast.makeText(context, "Image saved", Toast.LENGTH_SHORT).show()
+                }.onFailure { error ->
+                    Toast.makeText(context, "Could not save image: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            }
         }
     }
     val realMessagePage by produceState(
@@ -1608,6 +1661,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         automaticImagesAllowed = securePeer?.state == SecurePeerState.VERIFIED,
                         automaticImageAttempts = automaticImageAttempts,
                         onLongPress = { selectedMessage = message },
+                        onSecureImageLongPress = { selectedImageAction = ImageActionTarget.Secure(it) },
+                        onCarrierImageLongPress = { selectedImageAction = ImageActionTarget.Carrier(it) },
                         onAttachment = { descriptor ->
                             if (!descriptor.incoming) {
                                 SecureAttachmentRepository.openDownloaded(context, descriptor)
@@ -1703,6 +1758,33 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             onDelete = {
                 selectedMessage = null
                 deleteMessageCandidate = message
+            },
+        )
+    }
+    selectedImageAction?.let { target ->
+        ImageActionsDialog(
+            secure = target is ImageActionTarget.Secure,
+            onDismiss = { selectedImageAction = null },
+            onOpen = {
+                selectedImageAction = null
+                val result = when (target) {
+                    is ImageActionTarget.Secure -> SecureAttachmentRepository.openDownloaded(
+                        context,
+                        target.descriptor,
+                    )
+                    is ImageActionTarget.Carrier -> CarrierMmsRepository.openStoredImage(
+                        context,
+                        target.attachment,
+                    )
+                }
+                result.onFailure { error ->
+                    Toast.makeText(context, "Could not open image: ${error.message}", Toast.LENGTH_LONG).show()
+                }
+            },
+            onSave = {
+                pendingImageSave = target
+                selectedImageAction = null
+                imageSavePicker.launch(safeImageName(target.suggestedName))
             },
         )
     }
@@ -1862,6 +1944,37 @@ private fun ForwardMessageDialog(
 }
 
 @Composable
+private fun ImageActionsDialog(
+    secure: Boolean,
+    onDismiss: () -> Unit,
+    onOpen: () -> Unit,
+    onSave: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Image actions") },
+        text = {
+            Column {
+                if (secure) {
+                    Text(
+                        "A saved copy is decrypted and is no longer protected by the Vessel.",
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+                TextButton(onClick = onOpen, modifier = Modifier.fillMaxWidth()) {
+                    Text("Open image")
+                }
+                TextButton(onClick = onSave, modifier = Modifier.fillMaxWidth()) {
+                    Text("Save image…")
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Close") } },
+    )
+}
+
+@Composable
 private fun ConversationHeader(
     conversation: Conversation,
     securePeerState: SecurePeerState?,
@@ -1935,6 +2048,8 @@ private fun MessageBubble(
     automaticImagesAllowed: Boolean,
     automaticImageAttempts: MutableSet<String>,
     onLongPress: () -> Unit,
+    onSecureImageLongPress: (SecureAttachmentDescriptor) -> Unit,
+    onCarrierImageLongPress: (CarrierMmsAttachment) -> Unit,
     onAttachment: (SecureAttachmentDescriptor) -> Unit,
 ) {
     val context = LocalContext.current
@@ -1974,7 +2089,7 @@ private fun MessageBubble(
                 )
                 .padding(horizontal = 14.dp, vertical = 11.dp),
         ) {
-            Text(message.text, color = Mist, fontSize = 15.sp, lineHeight = 20.sp)
+            LinkifiedMessageText(message.text)
             message.attachment?.let { attachment ->
                 val downloaded = remember(attachment.id, attachmentRevision) {
                     SecureAttachmentRepository.downloadedCiphertext(context, attachment.id) != null
@@ -2028,7 +2143,10 @@ private fun MessageBubble(
                             .heightIn(max = 260.dp)
                             .padding(top = 9.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable { onAttachment(attachment) },
+                            .combinedClickable(
+                                onClick = { onAttachment(attachment) },
+                                onLongClick = { onSecureImageLongPress(attachment) },
+                            ),
                     )
                 }
                 Button(
@@ -2073,15 +2191,18 @@ private fun MessageBubble(
                             .heightIn(max = 260.dp)
                             .padding(top = 9.dp)
                             .clip(RoundedCornerShape(12.dp))
-                            .clickable {
-                                CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
-                                    Toast.makeText(
-                                        context,
-                                        "Could not open MMS image: ${error.message}",
-                                        Toast.LENGTH_LONG,
-                                    ).show()
-                                }
-                            },
+                            .combinedClickable(
+                                onClick = {
+                                    CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
+                                        Toast.makeText(
+                                            context,
+                                            "Could not open MMS image: ${error.message}",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
+                                    }
+                                },
+                                onLongClick = { onCarrierImageLongPress(attachment) },
+                            ),
                     )
                 }
                 Button(
@@ -2133,6 +2254,36 @@ private fun MessageBubble(
             }
         }
     }
+}
+
+@Composable
+private fun LinkifiedMessageText(text: String) {
+    val linkColor = Toxic
+    val links = remember(text) { findMessageUrls(text) }
+    val annotated = remember(text, linkColor) {
+        buildAnnotatedString {
+            var cursor = 0
+            links.forEach { link ->
+                append(text.substring(cursor, link.start))
+                withLink(
+                    LinkAnnotation.Url(
+                        url = link.browserUrl,
+                        styles = TextLinkStyles(
+                            style = SpanStyle(
+                                color = linkColor,
+                                textDecoration = TextDecoration.Underline,
+                            ),
+                        ),
+                    ),
+                ) {
+                    append(text.substring(link.start, link.endExclusive))
+                }
+                cursor = link.endExclusive
+            }
+            append(text.substring(cursor))
+        }
+    }
+    Text(annotated, color = Mist, fontSize = 15.sp, lineHeight = 20.sp)
 }
 
 @Composable
