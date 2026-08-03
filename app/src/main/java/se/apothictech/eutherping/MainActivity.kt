@@ -152,6 +152,7 @@ import se.apothictech.eutherping.sms.ConversationIndexCache
 import se.apothictech.eutherping.sms.SmsRepository
 import se.apothictech.eutherping.sms.SmsConversationIndexEntry
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -1481,39 +1482,62 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         loadedMessageLimit = requestedLimit
         messagePageLoading = false
     }
+    var missingMmsPartRetries by remember(conversation.id, smsRevision) { mutableIntStateOf(0) }
+    LaunchedEffect(realMessagePage.messages, attachmentRevision) {
+        val missingImagePart = realMessagePage.messages.any { message ->
+            message.isMms && message.carrierMmsAttachment == null
+        }
+        if (missingImagePart && missingMmsPartRetries < 3) {
+            val retry = missingMmsPartRetries++
+            delay(400L shl retry)
+            attachmentRevision++
+        } else if (!missingImagePart) {
+            missingMmsPartRetries = 0
+        }
+    }
     val messages = if (isRealSms) realMessagePage.messages else demoMessages
     var composerTransport by rememberSaveable(conversation.id) {
         mutableStateOf(conversation.transport)
     }
     var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
+    var pendingCarrierMmsUri by rememberSaveable(conversation.id) { mutableStateOf<Uri?>(null) }
     val focusManager = LocalFocusManager.current
     val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null && isRealSms && (!secureLane || securePeer?.canEncrypt == true)) {
+            if (!secureLane) {
+                pendingCarrierMmsUri?.let { previous ->
+                    runCatching {
+                        context.contentResolver.releasePersistableUriPermission(
+                            previous,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                    }
+                }
+                runCatching {
+                    context.contentResolver.takePersistableUriPermission(
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                    )
+                }
+                pendingCarrierMmsUri = uri
+                return@rememberLauncherForActivityResult
+            }
             attachmentBusy = true
             coroutineScope.launch {
                 val result = try {
                     withContext(Dispatchers.IO) {
-                        if (secureLane) {
-                            SecureAttachmentRepository.prepareOutgoing(
+                        SecureAttachmentRepository.prepareOutgoing(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            uri,
+                        ).flatMap { prepared ->
+                            SmsRepository.sendText(
                                 context,
                                 conversation.smsAddress.orEmpty(),
-                                uri,
-                            ).flatMap { prepared ->
-                                SmsRepository.sendText(
-                                    context,
-                                    conversation.smsAddress.orEmpty(),
-                                    prepared.wireBody,
-                                ).map {
-                                    "Encrypted attachment offered over ${prepared.descriptor.transportLabel.lowercase()}"
-                                }
+                                prepared.wireBody,
+                            ).map {
+                                "Encrypted attachment offered over ${prepared.descriptor.transportLabel.lowercase()}"
                             }
-                        } else {
-                            CarrierMmsRepository.sendImage(
-                                context,
-                                conversation.smsAddress.orEmpty(),
-                                draft,
-                                uri,
-                            ).map { "Carrier MMS queued" }
                         }
                     }
                 } catch (error: Throwable) {
@@ -1522,7 +1546,6 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     attachmentBusy = false
                 }
                 result.onSuccess { successMessage ->
-                    if (!secureLane) draft = ""
                     attachmentRevision++
                     Toast.makeText(
                         context,
@@ -1550,8 +1573,48 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
 
     fun sendMessage() {
+        if (attachmentBusy) return
         val text = draft.trim()
-        if (text.isNotEmpty()) {
+        val carrierMmsUri = pendingCarrierMmsUri
+        if (!secureLane && isRealSms && carrierMmsUri != null) {
+            attachmentBusy = true
+            coroutineScope.launch {
+                val result = try {
+                    withContext(Dispatchers.IO) {
+                        CarrierMmsRepository.sendImage(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            text,
+                            carrierMmsUri,
+                        )
+                    }
+                } catch (error: Throwable) {
+                    Result.failure(error)
+                } finally {
+                    attachmentBusy = false
+                }
+                result.onSuccess {
+                    draft = ""
+                    pendingCarrierMmsUri = null
+                    runCatching {
+                        context.contentResolver.releasePersistableUriPermission(
+                            carrierMmsUri,
+                            Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                        )
+                    }
+                    attachmentRevision++
+                    focusManager.clearFocus()
+                    Toast.makeText(context, "Carrier MMS queued", Toast.LENGTH_LONG).show()
+                }.onFailure {
+                    Log.e("EutherPingAttachment", "Carrier MMS send failed", it)
+                    Toast.makeText(
+                        context,
+                        "Carrier MMS failed: ${it.message}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            }
+        } else if (text.isNotEmpty()) {
             if (isRealSms) {
                 val outgoing = if (secureLane) {
                     SecureRepository.encryptMessage(context, conversation.smsAddress.orEmpty(), text)
@@ -1612,6 +1675,18 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 enabled = !secureLane || securePeer?.canEncrypt == true,
                 attachmentBusy = attachmentBusy,
                 attachmentEnabled = isRealSms,
+                carrierMmsUri = pendingCarrierMmsUri.takeUnless { secureLane },
+                onRemoveCarrierMms = {
+                    pendingCarrierMmsUri?.let { uri ->
+                        runCatching {
+                            context.contentResolver.releasePersistableUriPermission(
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION,
+                            )
+                        }
+                    }
+                    pendingCarrierMmsUri = null
+                },
                 onAttachment = {
                     attachmentPicker.launch(arrayOf(if (secureLane) "*/*" else "image/*"))
                 },
@@ -2191,9 +2266,21 @@ private fun MessageBubble(
                 }
             }
             message.carrierMmsAttachment?.let { attachment ->
-                val preview by produceState<Bitmap?>(initialValue = null, attachment.uri) {
-                    value = withContext(Dispatchers.IO) {
-                        CarrierMmsRepository.loadPreview(context, attachment).getOrNull()
+                val preview by produceState<Bitmap?>(
+                    initialValue = null,
+                    attachment.uri,
+                    attachmentRevision,
+                ) {
+                    value = null
+                    repeat(4) { attempt ->
+                        val loaded = withContext(Dispatchers.IO) {
+                            CarrierMmsRepository.loadPreview(context, attachment)
+                        }
+                        if (loaded.isSuccess) {
+                            value = loaded.getOrNull()
+                            return@produceState
+                        }
+                        if (attempt < 3) delay(350L shl attempt)
                     }
                 }
                 preview?.let { bitmap ->
@@ -2529,10 +2616,27 @@ private fun Composer(
     enabled: Boolean,
     attachmentBusy: Boolean,
     attachmentEnabled: Boolean,
+    carrierMmsUri: Uri?,
+    onRemoveCarrierMms: () -> Unit,
     onAttachment: () -> Unit,
     onSend: () -> Unit,
 ) {
+    val context = LocalContext.current
     val accent = if (transport == Transport.SECURE) Violet else Amber
+    val carrierMmsPreview by produceState<Bitmap?>(initialValue = null, carrierMmsUri) {
+        value = null
+        val uri = carrierMmsUri ?: return@produceState
+        repeat(2) { attempt ->
+            val loaded = withContext(Dispatchers.IO) {
+                CarrierMmsRepository.loadSourcePreview(context, uri)
+            }
+            if (loaded.isSuccess) {
+                value = loaded.getOrNull()
+                return@produceState
+            }
+            if (attempt == 0) delay(250L)
+        }
+    }
     Column(
         modifier = Modifier
             .background(Deep)
@@ -2572,6 +2676,50 @@ private fun Composer(
                 modifier = Modifier.padding(bottom = 6.dp),
             )
         }
+        carrierMmsPreview?.let { bitmap ->
+            DisposableEffect(bitmap) {
+                onDispose { bitmap.recycle() }
+            }
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = "MMS draft image preview",
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .aspectRatio(
+                            (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
+                                .coerceIn(0.72f, 1.8f),
+                        )
+                        .heightIn(max = 220.dp)
+                        .clip(RoundedCornerShape(14.dp)),
+                )
+                TextButton(
+                    onClick = onRemoveCarrierMms,
+                    enabled = !attachmentBusy,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("REMOVE MMS IMAGE", color = Amber, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
+        if (carrierMmsUri != null && carrierMmsPreview == null) {
+            Column(modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
+                Text(
+                    "PREPARING MMS PREVIEW… If this remains, remove the image and choose it again.",
+                    color = Amber,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 9.sp,
+                )
+                TextButton(
+                    onClick = onRemoveCarrierMms,
+                    enabled = !attachmentBusy,
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text("REMOVE MMS IMAGE", color = Amber, fontFamily = FontFamily.Monospace)
+                }
+            }
+        }
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onAttachment, enabled = enabled && !attachmentBusy && attachmentEnabled) {
                 Icon(Icons.Default.Add, contentDescription = "Attachment", tint = accent)
@@ -2585,6 +2733,7 @@ private fun Composer(
                         when {
                             secureOnly && !enabled -> "Verify vessel to emit secure pings…"
                             secureOnly -> "Emit secure ping…"
+                            carrierMmsUri != null -> "Write an MMS caption…"
                             else -> "Send SMS or add an MMS image…"
                         },
                         color = Muted,
@@ -2604,11 +2753,12 @@ private fun Composer(
                     cursorColor = accent,
                 ),
             )
-            IconButton(onClick = onSend, enabled = enabled && draft.isNotBlank()) {
+            val canSend = draft.isNotBlank() || carrierMmsPreview != null
+            IconButton(onClick = onSend, enabled = enabled && !attachmentBusy && canSend) {
                 Icon(
                     Icons.AutoMirrored.Filled.Send,
                     contentDescription = "Send",
-                    tint = if (!enabled || draft.isBlank()) Muted.copy(alpha = 0.4f) else accent,
+                    tint = if (!enabled || attachmentBusy || !canSend) Muted.copy(alpha = 0.4f) else accent,
                 )
             }
         }

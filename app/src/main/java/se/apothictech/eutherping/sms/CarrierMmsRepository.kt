@@ -41,15 +41,18 @@ object CarrierMmsRepository {
     private const val MAX_DECODED_DIMENSION = 2_560
     private const val MIN_SCALED_DIMENSION = 320
 
-    fun loadPreview(context: Context, attachment: CarrierMmsAttachment): Result<Bitmap> = runCatching {
+    fun loadPreview(context: Context, attachment: CarrierMmsAttachment): Result<Bitmap> =
+        loadSourcePreview(context, attachment.uri)
+
+    fun loadSourcePreview(context: Context, source: Uri): Result<Bitmap> = runCatching {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        checkNotNull(context.contentResolver.openInputStream(attachment.uri)).use {
+        checkNotNull(context.contentResolver.openInputStream(source)).use {
             BitmapFactory.decodeStream(it, null, bounds)
         }
         check(bounds.outWidth > 0 && bounds.outHeight > 0) { "MMS image could not be decoded" }
         var sample = 1
         while (bounds.outWidth / sample > 1200 || bounds.outHeight / sample > 1200) sample *= 2
-        checkNotNull(context.contentResolver.openInputStream(attachment.uri)).use {
+        checkNotNull(context.contentResolver.openInputStream(source)).use {
             checkNotNull(
                 BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }),
             ) { "MMS image could not be decoded" }

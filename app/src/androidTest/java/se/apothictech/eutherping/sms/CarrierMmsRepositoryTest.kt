@@ -99,6 +99,9 @@ class CarrierMmsRepositoryTest {
             "${context.packageName}.securefiles",
             source,
         )
+        val draftPreview = CarrierMmsRepository.loadSourcePreview(context, sourceUri).getOrThrow()
+        assertTrue("MMS draft preview had no pixels", draftPreview.width > 0 && draftPreview.height > 0)
+        draftPreview.recycle()
 
         val result = CarrierMmsRepository.sendImage(
             context,
