@@ -236,6 +236,40 @@ private data class LoadedConversationMessages(
     val hasOlder: Boolean = false,
 )
 
+private const val INITIAL_CONVERSATION_MESSAGES = 20
+private const val CONVERSATION_PAGE_INCREMENT = 30
+
+private data class ConversationPageCacheKey(
+    val threadId: Long?,
+    val address: String,
+    val secureLane: Boolean,
+    val smsRevision: Int,
+    val secureRevision: Int,
+    val attachmentRevision: Int,
+    val limit: Int,
+)
+
+private object ConversationPageMemoryCache {
+    private const val MAX_PAGES = 12
+    private val pages = object : LinkedHashMap<ConversationPageCacheKey, LoadedConversationMessages>(
+        MAX_PAGES,
+        0.75f,
+        true,
+    ) {
+        override fun removeEldestEntry(
+            eldest: MutableMap.MutableEntry<ConversationPageCacheKey, LoadedConversationMessages>?,
+        ): Boolean = size > MAX_PAGES
+    }
+
+    @Synchronized
+    fun get(key: ConversationPageCacheKey): LoadedConversationMessages? = pages[key]
+
+    @Synchronized
+    fun put(key: ConversationPageCacheKey, page: LoadedConversationMessages) {
+        pages[key] = page
+    }
+}
+
 private fun applyContactNames(history: DeckHistory, contacts: List<PhoneContact>): DeckHistory {
     fun label(conversation: Conversation): Conversation {
         val address = conversation.smsAddress ?: return conversation
@@ -841,7 +875,7 @@ private fun DeckHeader(
                 letterSpacing = 1.8.sp,
             )
             Text(
-                "ACOUSTIC MESSAGE TERMINAL 0.7.0",
+                "ACOUSTIC MESSAGE TERMINAL 0.7.1",
                 color = Toxic.copy(alpha = 0.48f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -1279,7 +1313,9 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var forwardingMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var deleteMessageCandidate by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var showDeleteConversation by remember(conversation.id) { mutableStateOf(false) }
-    var messageLimit by remember(conversation.id) { mutableIntStateOf(150) }
+    var messageLimit by remember(conversation.id) { mutableIntStateOf(INITIAL_CONVERSATION_MESSAGES) }
+    var loadedMessageLimit by remember(conversation.id) { mutableIntStateOf(0) }
+    var messagePageLoading by remember(conversation.id) { mutableStateOf(false) }
     val demoMessages = remember(conversation.id) {
         mutableStateListOf(
             DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", conversation.transport),
@@ -1305,6 +1341,25 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         attachmentRevision,
         messageLimit,
     ) {
+        messagePageLoading = true
+        val requestedLimit = messageLimit
+        val cacheKey = ConversationPageCacheKey(
+            threadId = conversation.threadId,
+            address = conversation.smsAddress.orEmpty(),
+            secureLane = secureLane,
+            smsRevision = smsRevision,
+            secureRevision = secureRevision,
+            attachmentRevision = attachmentRevision,
+            limit = requestedLimit,
+        )
+        ConversationPageMemoryCache.get(cacheKey)?.let { cached ->
+            value = cached
+            loadedMessageLimit = requestedLimit
+            Log.i(
+                "EutherPingPerf",
+                "conversation memory cache hit (${cached.messages.size} visible, limit=$requestedLimit)",
+            )
+        }
         value = if (isRealSms) {
             withContext(Dispatchers.IO) {
                 val startedAt = SystemClock.elapsedRealtime()
@@ -1312,7 +1367,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     context = context,
                     threadId = conversation.threadId,
                     address = conversation.smsAddress.orEmpty(),
-                    limit = messageLimit,
+                    limit = requestedLimit,
+                    secureLane = secureLane,
                 ).getOrElse { error ->
                     Log.e("EutherPingPerf", "Conversation load failed", error)
                     return@withContext LoadedConversationMessages()
@@ -1343,7 +1399,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         Log.i(
                             "EutherPingPerf",
                             "conversation loaded in ${SystemClock.elapsedRealtime() - startedAt} ms " +
-                                "(${it.messages.size} visible, limit=$messageLimit)",
+                                "(${it.messages.size} visible, limit=$requestedLimit)",
                         )
                     }
                 }
@@ -1351,6 +1407,9 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         } else {
             LoadedConversationMessages()
         }
+        ConversationPageMemoryCache.put(cacheKey, value)
+        loadedMessageLimit = requestedLimit
+        messagePageLoading = false
     }
     val messages = if (isRealSms) realMessagePage.messages else demoMessages
     var composerTransport by rememberSaveable(conversation.id) {
@@ -1593,13 +1652,19 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     )
                 }
                 if (isRealSms && realMessagePage.hasOlder) {
-                    item {
-                        TextButton(
-                            onClick = { messageLimit += 250 },
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text("LOAD 250 OLDER MESSAGES")
+                    item(key = "automatic-older-page") {
+                        LaunchedEffect(loadedMessageLimit, realMessagePage.messages.size) {
+                            if (!messagePageLoading && loadedMessageLimit == messageLimit) {
+                                messageLimit += CONVERSATION_PAGE_INCREMENT
+                            }
                         }
+                        Text(
+                            if (messagePageLoading) "LOADING OLDER MESSAGES…" else "SCROLL FOR OLDER MESSAGES",
+                            color = Muted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                        )
                     }
                 }
                 item {

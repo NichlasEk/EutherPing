@@ -48,6 +48,63 @@ class SmsRepositoryPerformanceTest {
             val page = SmsRepository.loadMessagePage(context, threadId, address, limit = 2).getOrThrow()
             assertTrue(page.hasOlder)
             assertEquals(listOf("EP1M:not-a-real-capsule", "new ordinary"), page.messages.map { it.body })
+
+            val signalPage = SmsRepository.loadMessagePage(
+                context,
+                threadId,
+                address,
+                limit = 2,
+                secureLane = false,
+            ).getOrThrow()
+            assertEquals(listOf("old ordinary", "new ordinary"), signalPage.messages.map { it.body })
+
+            val vesselPage = SmsRepository.loadMessagePage(
+                context,
+                threadId,
+                address,
+                limit = 1,
+                secureLane = true,
+            ).getOrThrow()
+            assertEquals(listOf("EP1M:not-a-real-capsule"), vesselPage.messages.map { it.body })
+        } finally {
+            inserted.forEach { context.contentResolver.delete(it, null, null) }
+        }
+    }
+
+    @Test
+    fun firstHistoryPageStaysBoundedForLongThreads() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("cmd role add-role-holder android.app.role.SMS ${context.packageName}")
+            .close()
+        Thread.sleep(500)
+
+        val address = "1555100${System.currentTimeMillis().toString().takeLast(4)}"
+        val inserted = (0 until 75).map { index ->
+            insert(context, address, "bulk-$index", 10_000L + index)
+        }
+        try {
+            val threadId = checkNotNull(
+                context.contentResolver.query(
+                    inserted.last(),
+                    arrayOf(Telephony.Sms.THREAD_ID),
+                    null,
+                    null,
+                    null,
+                )?.use { cursor -> if (cursor.moveToFirst()) cursor.getLong(0) else null },
+            )
+            val page = SmsRepository.loadMessagePage(
+                context,
+                threadId,
+                address,
+                limit = 20,
+                secureLane = false,
+            ).getOrThrow()
+
+            assertTrue(page.hasOlder)
+            assertEquals(20, page.messages.size)
+            assertEquals("bulk-55", page.messages.first().body)
+            assertEquals("bulk-74", page.messages.last().body)
         } finally {
             inserted.forEach { context.contentResolver.delete(it, null, null) }
         }

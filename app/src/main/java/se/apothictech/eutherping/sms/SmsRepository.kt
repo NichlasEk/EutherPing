@@ -4,16 +4,20 @@ import android.Manifest
 import android.app.Activity
 import android.app.PendingIntent
 import android.app.role.RoleManager
+import android.content.ContentResolver
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.database.Cursor
 import android.net.Uri
 import android.os.Build
+import android.os.Bundle
 import android.provider.Telephony
 import android.telephony.PhoneNumberUtils
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
+import se.apothictech.eutherping.secure.SecureRepository
 
 data class SmsThread(
     val threadId: Long,
@@ -393,6 +397,7 @@ object SmsRepository {
         threadId: Long?,
         address: String,
         limit: Int,
+        secureLane: Boolean? = null,
     ): Result<SmsMessagePage> = runCatching {
         check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
         require(limit > 0) { "Message limit must be positive" }
@@ -404,8 +409,8 @@ object SmsRepository {
             Telephony.Sms.READ,
             Telephony.Sms.STATUS,
         )
-        val selection: String
-        val arguments: Array<String>
+        var selection: String
+        var arguments: Array<String>
         if (threadId != null && threadId > 0) {
             selection = "${Telephony.Sms.THREAD_ID} = ?"
             arguments = arrayOf(threadId.toString())
@@ -413,14 +418,23 @@ object SmsRepository {
             selection = "${Telephony.Sms.ADDRESS} = ?"
             arguments = arrayOf(address)
         }
+        secureLane?.let { secure ->
+            val secureClause = SecureRepository.secureBodyPrefixes.joinToString(" OR ") {
+                "${Telephony.Sms.BODY} LIKE ?"
+            }
+            selection += if (secure) " AND ($secureClause)" else " AND NOT ($secureClause)"
+            arguments += SecureRepository.secureBodyPrefixes.map { "$it%" }
+        }
         val candidates = mutableListOf<SmsEntry>()
-        var smsTruncated = false
-        context.contentResolver.query(
-            Telephony.Sms.CONTENT_URI,
-            projection,
-            selection,
-            arguments,
-            "${Telephony.Sms.DATE} DESC",
+        val queryLimit = (limit.toLong() + 1L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        queryNewest(
+            context = context,
+            uri = Telephony.Sms.CONTENT_URI,
+            projection = projection,
+            selection = selection,
+            arguments = arguments,
+            sortColumn = Telephony.Sms.DATE,
+            limit = queryLimit,
         )?.use { cursor ->
             val idIndex = cursor.getColumnIndexOrThrow(Telephony.Sms._ID)
             val bodyIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.BODY)
@@ -428,11 +442,7 @@ object SmsRepository {
             val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
             val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
             val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
-            while (cursor.moveToNext()) {
-                if (candidates.size >= limit) {
-                    smsTruncated = true
-                    break
-                }
+            while (candidates.size < queryLimit && cursor.moveToNext()) {
                 val type = cursor.getInt(typeIndex)
                 candidates += SmsEntry(
                     id = cursor.getLong(idIndex),
@@ -444,7 +454,14 @@ object SmsRepository {
                 )
             }
         }
-        loadMmsEntries(context, threadId, address).forEach { mms ->
+        val smsTruncated = candidates.size > limit
+        val mmsEntries = if (secureLane == true) {
+            emptyList()
+        } else {
+            loadMmsEntries(context, threadId, address, limit = queryLimit)
+        }
+        val mmsTruncated = mmsEntries.size > limit
+        mmsEntries.forEach { mms ->
             candidates += SmsEntry(
                 id = -mms.id - 1,
                 body = mms.body.ifBlank {
@@ -461,7 +478,44 @@ object SmsRepository {
         val newest = candidates.sortedByDescending(SmsEntry::timestamp)
         SmsMessagePage(
             messages = newest.take(limit).sortedBy(SmsEntry::timestamp),
-            hasOlder = smsTruncated || newest.size > limit,
+            hasOlder = smsTruncated || mmsTruncated || newest.size > limit,
+        )
+    }
+
+    private fun queryNewest(
+        context: Context,
+        uri: Uri,
+        projection: Array<String>,
+        selection: String,
+        arguments: Array<String>,
+        sortColumn: String,
+        limit: Int,
+    ): Cursor? {
+        val queryArguments = Bundle().apply {
+            putString(ContentResolver.QUERY_ARG_SQL_SELECTION, selection)
+            putStringArray(ContentResolver.QUERY_ARG_SQL_SELECTION_ARGS, arguments)
+            putStringArray(ContentResolver.QUERY_ARG_SORT_COLUMNS, arrayOf(sortColumn))
+            putInt(ContentResolver.QUERY_ARG_SORT_DIRECTION, ContentResolver.QUERY_SORT_DIRECTION_DESCENDING)
+            putInt(ContentResolver.QUERY_ARG_LIMIT, limit)
+        }
+        runCatching {
+            context.contentResolver.query(uri, projection, queryArguments, null)
+        }.getOrNull()?.let { return it }
+        runCatching {
+            context.contentResolver.query(
+                uri,
+                projection,
+                selection,
+                arguments,
+                "$sortColumn DESC LIMIT $limit",
+            )
+        }.getOrNull()?.let { return it }
+        return context.contentResolver.query(
+            uri,
+            projection,
+            selection,
+            arguments,
+            "$sortColumn DESC",
         )
     }
 
@@ -483,6 +537,7 @@ object SmsRepository {
         address: String?,
         includeParts: Boolean = true,
         resolveAddresses: Boolean = true,
+        limit: Int? = null,
     ): List<MmsEntry> = runCatching {
         buildList {
             val projection = arrayOf(
@@ -493,20 +548,35 @@ object SmsRepository {
                 Telephony.Mms.READ,
                 Telephony.Mms.SUBJECT,
             )
-            context.contentResolver.query(
-                Telephony.Mms.CONTENT_URI,
-                projection,
-                threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" },
-                threadId?.let { arrayOf(it.toString()) },
-                "${Telephony.Mms.DATE} ASC",
-            )?.use { cursor ->
+            val selection = threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" }
+            val arguments = threadId?.let { arrayOf(it.toString()) }
+            val cursor = if (limit != null && selection != null && arguments != null) {
+                queryNewest(
+                    context = context,
+                    uri = Telephony.Mms.CONTENT_URI,
+                    projection = projection,
+                    selection = selection,
+                    arguments = arguments,
+                    sortColumn = Telephony.Mms.DATE,
+                    limit = limit,
+                )
+            } else {
+                context.contentResolver.query(
+                    Telephony.Mms.CONTENT_URI,
+                    projection,
+                    selection,
+                    arguments,
+                    "${Telephony.Mms.DATE} ASC",
+                )
+            }
+            cursor?.use { cursor ->
                 val idIndex = cursor.getColumnIndexOrThrow(Telephony.Mms._ID)
                 val threadIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.THREAD_ID)
                 val dateIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.DATE)
                 val boxIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
                 val readIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.READ)
                 val subjectIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.SUBJECT)
-                while (cursor.moveToNext()) {
+                while ((limit == null || size < limit) && cursor.moveToNext()) {
                     val id = cursor.getLong(idIndex)
                     val box = cursor.getInt(boxIndex)
                     val incoming = box == Telephony.Mms.MESSAGE_BOX_INBOX
