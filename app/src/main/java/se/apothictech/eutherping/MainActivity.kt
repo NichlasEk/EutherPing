@@ -488,7 +488,10 @@ private fun EutherPingApp(
     }
     val isDefaultSmsApp = remember(setupRevision) { SmsRepository.isDefaultSmsApp(context) }
     val hasSmsPermissions = remember(setupRevision) { SmsRepository.hasSmsPermissions(context) }
-    val smsRevision = rememberSmsRevision(isDefaultSmsApp && hasSmsPermissions)
+    val smsRevision = rememberSmsRevision(
+        enabled = isDefaultSmsApp && hasSmsPermissions,
+        resumeRevision = setupRevision,
+    )
 
     LaunchedEffect(isDefaultSmsApp, hasSmsPermissions) {
         if (isDefaultSmsApp && !hasSmsPermissions) {
@@ -517,12 +520,15 @@ private fun EutherPingApp(
     LaunchedEffect(requestedAddress, requestedSecureLane) {
         val address = requestedAddress?.trim().orEmpty()
         if (address.isNotEmpty()) {
+            val contactName = withContext(Dispatchers.IO) {
+                ContactRepository.displayName(context, address)
+            }
             if (requestedSecureLane) {
                 selectedTab = SignalTab.CONTACTS
-                activeConversation = secureConversation(address, null)
+                activeConversation = secureConversation(address, null, contactName)
             } else {
                 selectedTab = SignalTab.SIGNALS
-                activeConversation = cellConversation(address, null)
+                activeConversation = cellConversation(address, null, contactName)
             }
             onAddressConsumed()
         }
@@ -623,7 +629,7 @@ private fun EutherPingApp(
 }
 
 @Composable
-private fun rememberSmsRevision(enabled: Boolean): Int {
+private fun rememberSmsRevision(enabled: Boolean, resumeRevision: Int): Int {
     val context = LocalContext.current
     var revision by remember { mutableIntStateOf(0) }
     DisposableEffect(context, enabled) {
@@ -642,6 +648,9 @@ private fun rememberSmsRevision(enabled: Boolean): Int {
             handler.removeCallbacks(refresh)
             context.contentResolver.unregisterContentObserver(observer)
         }
+    }
+    LaunchedEffect(enabled, resumeRevision) {
+        if (enabled) revision++
     }
     return revision
 }
@@ -1669,7 +1678,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 items(messages.asReversed(), key = { it.id }) { message ->
                     MessageBubble(
                         message = message,
-                        attachmentRevision = attachmentRevision,
+                        attachmentRevision = attachmentRevision + smsRevision,
                         secureAddress = conversation.smsAddress.takeIf { secureLane },
                         automaticImagesAllowed = securePeer?.state == SecurePeerState.VERIFIED,
                         automaticImageAttempts = automaticImageAttempts,

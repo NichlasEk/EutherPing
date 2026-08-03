@@ -3,6 +3,7 @@ package se.apothictech.eutherping.contacts
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.provider.ContactsContract
 import android.telephony.PhoneNumberUtils
 import androidx.core.content.ContextCompat
@@ -75,6 +76,29 @@ object ContactRepository {
                         normalizedAddress.takeLast(7) == normalizedContact.takeLast(7)
                 )
         }?.name
+    }
+
+    /** Resolve one incoming address without loading the complete phonebook. */
+    fun displayName(context: Context, address: String): String? {
+        if (!hasPermission(context) || address.isBlank()) return null
+        val lookupUri = Uri.withAppendedPath(
+            ContactsContract.PhoneLookup.CONTENT_FILTER_URI,
+            Uri.encode(address),
+        )
+        return runCatching {
+            context.contentResolver.query(
+                lookupUri,
+                arrayOf(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) return@use null
+                cursor.getString(
+                    cursor.getColumnIndexOrThrow(ContactsContract.PhoneLookup.DISPLAY_NAME),
+                )?.trim()?.takeIf(String::isNotEmpty)
+            }
+        }.getOrNull()
     }
 
     private fun normalizedNumber(number: String): String = PhoneNumberUtils.normalizeNumber(number)

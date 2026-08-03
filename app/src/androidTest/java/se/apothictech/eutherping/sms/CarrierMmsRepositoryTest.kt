@@ -32,6 +32,7 @@ class CarrierMmsRepositoryTest {
             "+46701234567",
             "Carrier MMS received",
             secureLane = false,
+            displayName = "Ada Lovelace",
         )
 
         val notification = manager.activeNotifications
@@ -41,6 +42,10 @@ class CarrierMmsRepositoryTest {
         assertTrue(
             "Carrier MMS notification text was incorrect",
             notification!!.extras.getCharSequence(Notification.EXTRA_TEXT) == "Carrier MMS received",
+        )
+        assertTrue(
+            "Carrier MMS notification did not prefer the contact name",
+            notification.extras.getCharSequence(Notification.EXTRA_TITLE) == "Ada Lovelace",
         )
         manager.cancel("+46701234567".hashCode())
     }

@@ -14,11 +14,18 @@ import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import se.apothictech.eutherping.MainActivity
 import se.apothictech.eutherping.R
+import se.apothictech.eutherping.contacts.ContactRepository
 
 object IncomingMessageNotifier {
     internal const val CHANNEL_ID = "incoming_sms"
 
-    fun show(context: Context, address: String, body: String, secureLane: Boolean) {
+    fun show(
+        context: Context,
+        address: String,
+        body: String,
+        secureLane: Boolean,
+        displayName: String? = ContactRepository.displayName(context, address),
+    ) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
@@ -47,7 +54,7 @@ object IncomingMessageNotifier {
         )
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_eutherping)
-            .setContentTitle(address)
+            .setContentTitle(displayName ?: address)
             .setContentText(body)
             .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(pendingIntent)
