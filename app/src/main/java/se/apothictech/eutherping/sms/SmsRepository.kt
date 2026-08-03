@@ -394,6 +394,12 @@ object SmsRepository {
             .messages
     }
 
+    fun loadMmsAttachment(context: Context, messageId: Long): CarrierMmsAttachment? {
+        val providerId = -messageId - 1
+        if (providerId < 0) return null
+        return mmsParts(context, providerId).second
+    }
+
     fun loadMessagePage(
         context: Context,
         threadId: Long?,

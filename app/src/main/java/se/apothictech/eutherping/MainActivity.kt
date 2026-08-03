@@ -90,6 +90,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -1360,6 +1361,9 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var messageLimit by remember(conversation.id) { mutableIntStateOf(INITIAL_CONVERSATION_MESSAGES) }
     var loadedMessageLimit by remember(conversation.id) { mutableIntStateOf(0) }
     var messagePageLoading by remember(conversation.id) { mutableStateOf(false) }
+    val lateMmsAttachments = remember(conversation.id) {
+        mutableStateMapOf<Long, CarrierMmsAttachment>()
+    }
     val demoMessages = remember(conversation.id) {
         mutableStateListOf(
             DemoMessage(1, "Can you still see the harbor lights?", false, "22:04", conversation.transport),
@@ -1482,20 +1486,36 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         loadedMessageLimit = requestedLimit
         messagePageLoading = false
     }
-    var missingMmsPartRetries by remember(conversation.id, smsRevision) { mutableIntStateOf(0) }
-    LaunchedEffect(realMessagePage.messages, attachmentRevision) {
-        val missingImagePart = realMessagePage.messages.any { message ->
-            message.isMms && message.carrierMmsAttachment == null
-        }
-        if (missingImagePart && missingMmsPartRetries < 3) {
-            val retry = missingMmsPartRetries++
-            delay(400L shl retry)
-            attachmentRevision++
-        } else if (!missingImagePart) {
-            missingMmsPartRetries = 0
+    LaunchedEffect(realMessagePage.messages, smsRevision) {
+        val unresolved = realMessagePage.messages
+            .filter { it.isMms && it.carrierMmsAttachment == null && it.id !in lateMmsAttachments }
+            .mapTo(mutableSetOf()) { it.id }
+        repeat(6) { attempt ->
+            if (unresolved.isEmpty()) return@LaunchedEffect
+            if (attempt > 0) delay(400L shl (attempt - 1))
+            val resolved = withContext(Dispatchers.IO) {
+                unresolved.mapNotNull { messageId ->
+                    SmsRepository.loadMmsAttachment(context, messageId)?.let { messageId to it }
+                }
+            }
+            resolved.forEach { (messageId, attachment) ->
+                lateMmsAttachments[messageId] = attachment
+                unresolved.remove(messageId)
+            }
         }
     }
-    val messages = if (isRealSms) realMessagePage.messages else demoMessages
+    val messages = if (isRealSms) {
+        realMessagePage.messages.map { message ->
+            val lateAttachment = lateMmsAttachments[message.id]
+            if (message.isMms && message.carrierMmsAttachment == null && lateAttachment != null) {
+                message.copy(carrierMmsAttachment = lateAttachment)
+            } else {
+                message
+            }
+        }
+    } else {
+        demoMessages
+    }
     var composerTransport by rememberSaveable(conversation.id) {
         mutableStateOf(conversation.transport)
     }
@@ -2265,13 +2285,15 @@ private fun MessageBubble(
                     )
                 }
             }
-            message.carrierMmsAttachment?.let { attachment ->
+            if (message.isMms) {
+                val attachment = message.carrierMmsAttachment
                 val preview by produceState<Bitmap?>(
                     initialValue = null,
-                    attachment.uri,
+                    attachment?.uri,
                     attachmentRevision,
                 ) {
                     value = null
+                    attachment ?: return@produceState
                     repeat(4) { attempt ->
                         val loaded = withContext(Dispatchers.IO) {
                             CarrierMmsRepository.loadPreview(context, attachment)
@@ -2283,38 +2305,46 @@ private fun MessageBubble(
                         if (attempt < 3) delay(350L shl attempt)
                     }
                 }
-                preview?.let { bitmap ->
-                    DisposableEffect(bitmap) {
-                        onDispose { bitmap.recycle() }
+                Box(
+                    modifier = Modifier
+                        .padding(top = 9.dp)
+                        .fillMaxWidth()
+                        .height(190.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Void.copy(alpha = 0.28f)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    val bitmap = preview
+                    if (bitmap != null && attachment != null) {
+                        Image(
+                            bitmap = bitmap.asImageBitmap(),
+                            contentDescription = "Carrier MMS image",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .combinedClickable(
+                                    onClick = {
+                                        CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
+                                            Toast.makeText(
+                                                context,
+                                                "Could not open MMS image: ${error.message}",
+                                                Toast.LENGTH_LONG,
+                                            ).show()
+                                        }
+                                    },
+                                    onLongClick = { onCarrierImageLongPress(attachment) },
+                                ),
+                        )
+                    } else {
+                        Text(
+                            if (attachment == null) "WAITING FOR MMS IMAGE…" else "LOADING MMS IMAGE…",
+                            color = Muted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                        )
                     }
-                    Image(
-                        bitmap = bitmap.asImageBitmap(),
-                        contentDescription = "Carrier MMS image",
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .aspectRatio(
-                                (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
-                                    .coerceIn(0.72f, 1.8f),
-                            )
-                            .heightIn(max = 260.dp)
-                            .padding(top = 9.dp)
-                            .clip(RoundedCornerShape(12.dp))
-                            .combinedClickable(
-                                onClick = {
-                                    CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
-                                        Toast.makeText(
-                                            context,
-                                            "Could not open MMS image: ${error.message}",
-                                            Toast.LENGTH_LONG,
-                                        ).show()
-                                    }
-                                },
-                                onLongClick = { onCarrierImageLongPress(attachment) },
-                            ),
-                    )
                 }
-                Button(
+                if (attachment != null) Button(
                     onClick = {
                         CarrierMmsRepository.openStoredImage(context, attachment).onFailure { error ->
                             Toast.makeText(
@@ -2677,9 +2707,6 @@ private fun Composer(
             )
         }
         carrierMmsPreview?.let { bitmap ->
-            DisposableEffect(bitmap) {
-                onDispose { bitmap.recycle() }
-            }
             Column(modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
                 Image(
                     bitmap = bitmap.asImageBitmap(),

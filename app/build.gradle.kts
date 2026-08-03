@@ -12,8 +12,8 @@ android {
         applicationId = "se.apothictech.eutherping"
         minSdk = 28
         targetSdk = 36
-        versionCode = 24
-        versionName = "0.7.7"
+        versionCode = 25
+        versionName = "0.7.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 

@@ -101,7 +101,10 @@ class CarrierMmsRepositoryTest {
         )
         val draftPreview = CarrierMmsRepository.loadSourcePreview(context, sourceUri).getOrThrow()
         assertTrue("MMS draft preview had no pixels", draftPreview.width > 0 && draftPreview.height > 0)
-        draftPreview.recycle()
+        assertTrue(
+            "Repeated MMS draft previews did not use the memory cache",
+            draftPreview === CarrierMmsRepository.loadSourcePreview(context, sourceUri).getOrThrow(),
+        )
 
         val result = CarrierMmsRepository.sendImage(
             context,
@@ -124,15 +127,19 @@ class CarrierMmsRepositoryTest {
             "One-pass history did not include the persisted carrier MMS",
             mmsConversation,
         )
-        val attachment = SmsRepository.loadMessages(
+        val mmsEntry = SmsRepository.loadMessages(
             context,
             mmsConversation!!.thread.threadId,
             mmsConversation.thread.address,
-        ).firstOrNull(SmsEntry::isMms)?.mmsAttachment
+        ).firstOrNull(SmsEntry::isMms)
+        val attachment = mmsEntry?.mmsAttachment
         assertNotNull("Conversation detail did not expose the carrier image", attachment)
+        assertNotNull(
+            "Targeted MMS part lookup did not expose the carrier image",
+            mmsEntry?.let { SmsRepository.loadMmsAttachment(context, it.id) },
+        )
         val preview = CarrierMmsRepository.loadPreview(context, attachment!!).getOrThrow()
         assertTrue("Carrier preview had no pixels", preview.width > 0 && preview.height > 0)
-        preview.recycle()
         val viewUri = CarrierMmsRepository.prepareStoredImage(context, attachment).getOrThrow()
         assertTrue(
             "Temporary MMS view copy was empty",

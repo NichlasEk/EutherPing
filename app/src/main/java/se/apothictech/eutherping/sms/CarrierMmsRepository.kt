@@ -13,6 +13,7 @@ import android.provider.Telephony
 import android.telephony.SubscriptionManager
 import android.telephony.SmsManager
 import android.util.Log
+import android.util.LruCache
 import androidx.core.content.FileProvider
 import com.google.android.mms.pdu_alt.EncodedStringValue
 import com.google.android.mms.pdu_alt.NotificationInd
@@ -40,22 +41,38 @@ object CarrierMmsRepository {
     private const val MAX_SOURCE_BYTES = 100L * 1024 * 1024
     private const val MAX_DECODED_DIMENSION = 2_560
     private const val MIN_SCALED_DIMENSION = 320
+    private const val PREVIEW_CACHE_KIB = 24 * 1024
+    private const val PREVIEW_MAX_DIMENSION = 960
+    private val previewCache = object : LruCache<String, Bitmap>(PREVIEW_CACHE_KIB) {
+        override fun sizeOf(key: String, value: Bitmap): Int =
+            (value.allocationByteCount / 1024).coerceAtLeast(1)
+    }
 
     fun loadPreview(context: Context, attachment: CarrierMmsAttachment): Result<Bitmap> =
         loadSourcePreview(context, attachment.uri)
 
     fun loadSourcePreview(context: Context, source: Uri): Result<Bitmap> = runCatching {
+        val cacheKey = source.toString()
+        synchronized(previewCache) {
+            previewCache.get(cacheKey)?.takeUnless(Bitmap::isRecycled)?.let { return@runCatching it }
+            previewCache.remove(cacheKey)
+        }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         checkNotNull(context.contentResolver.openInputStream(source)).use {
             BitmapFactory.decodeStream(it, null, bounds)
         }
         check(bounds.outWidth > 0 && bounds.outHeight > 0) { "MMS image could not be decoded" }
         var sample = 1
-        while (bounds.outWidth / sample > 1200 || bounds.outHeight / sample > 1200) sample *= 2
+        while (
+            bounds.outWidth / sample > PREVIEW_MAX_DIMENSION ||
+            bounds.outHeight / sample > PREVIEW_MAX_DIMENSION
+        ) sample *= 2
         checkNotNull(context.contentResolver.openInputStream(source)).use {
             checkNotNull(
                 BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }),
-            ) { "MMS image could not be decoded" }
+            ) { "MMS image could not be decoded" }.also { decoded ->
+                synchronized(previewCache) { previewCache.put(cacheKey, decoded) }
+            }
         }
     }
 
