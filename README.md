@@ -1,5 +1,11 @@
 # EutherPing
 
+Version 0.8.7 preserves an already verified Vessel identity when a different
+pairing identity arrives. Secure sending locks fail-closed, the replacement is
+kept separately from the trusted keys, and the user must explicitly keep the
+old identity or begin verification of the new safety code. Repeated or third
+replacement controls cannot silently overwrite either identity.
+
 Version 0.8.6 rejects replayed, stale, and conflicting authenticated Secure
 message and attachment frames before they enter Android message history. The
 private replay index stores only bounded frame hashes and acceptance times: no
@@ -54,7 +60,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.6`; the detailed `0.8.0` overview below describes
+The current release is `0.8.7`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
@@ -68,7 +74,7 @@ Long-pressing a message offers copy, forward, and local deletion. Secure forward
 
 Secure Ping pairs two installations with compact public-key invitation and acceptance capsules, shows the same safety code on both phones, and encrypts signed messages to the recipient's public key only after both users verify that code. It uses Google Tink's HPKE construction (X25519, HKDF-SHA-256, AES-256-GCM) and Ed25519 signatures. Private keysets and the local sent-message plaintext vault are protected by Android Keystore. No private key is placed in SMS or the Android Telephony provider.
 
-This is deliberately labelled **Secure Beta**. It does not yet implement a Double Ratchet, forward secrecy, post-compromise security, replay tracking, group encryption, or secure backups. Carrier metadata, delivery records, multipart-SMS cost, and the fact that two numbers communicate remain visible to the mobile network. Carrier MMS is a separate ordinary-telephony feature and is not end-to-end encrypted. Its first beta supports one image plus an optional caption, group MMS, and manual per-conversation SIM selection. Video/audio, backup, and Secure group messaging remain future work.
+This is deliberately labelled **Secure Beta**. It does not yet implement a Double Ratchet, forward secrecy, post-compromise security, group encryption, or secure backups. Authenticated message and attachment frames do have bounded replay and stale-frame rejection; pairing controls instead preserve and quarantine unexpected identity changes for explicit review. Carrier metadata, delivery records, multipart-SMS cost, and the fact that two numbers communicate remain visible to the mobile network. Carrier MMS is a separate ordinary-telephony feature and is not end-to-end encrypted. Its first beta supports one image plus an optional caption, group MMS, and manual per-conversation SIM selection. Video/audio, backup, and Secure group messaging remain future work.
 
 ## Try Secure Ping on two phones
 
@@ -95,7 +101,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Privacy
 
-EutherPing 0.8.5 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext is stored in a Keystore-protected local vault so the sender can read their own history. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
+EutherPing 0.8.7 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext is stored in a Keystore-protected local vault so the sender can read their own history. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
 
 ## Visual direction
 
@@ -103,7 +109,7 @@ Near-black OLED surfaces, toxic-green sonar geometry, amber carrier signals, and
 
 ## Security direction
 
-EutherPing owns its compact `EP2I`/`EP2A` pairing framing and `EP1M` message framing, product semantics, and versioning while relying on established cryptographic constructions. Legacy `EP1I`/`EP1A` pairing messages remain readable. No silent fallback from Secure Ping to plaintext SMS is allowed. The next security milestone is a reviewed session protocol with replay protection and a Double Ratchet instead of adding home-grown cryptographic primitives.
+EutherPing owns its compact `EP2I`/`EP2A` pairing framing and `EP1M` message framing, product semantics, and versioning while relying on established cryptographic constructions. Legacy `EP1I`/`EP1A` pairing messages remain readable. No silent fallback from Secure Ping to plaintext SMS is allowed. The next security milestone is a reviewed session protocol with a Double Ratchet instead of adding home-grown cryptographic primitives.
 
 License selection is intentionally deferred until the first product architecture is settled.
 

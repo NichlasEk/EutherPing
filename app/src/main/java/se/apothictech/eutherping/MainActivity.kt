@@ -2341,6 +2341,39 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                 SecureRepository.markVerified(context, conversation.smsAddress.orEmpty())
                                 secureRevision++
                             },
+                            onAcceptIdentityChange = {
+                                SecureRepository.acceptIdentityChange(
+                                    context,
+                                    conversation.smsAddress.orEmpty(),
+                                ).flatMap { response ->
+                                    if (response == null) {
+                                        Result.success(Unit)
+                                    } else {
+                                        SmsRepository.sendText(
+                                            context,
+                                            conversation.smsAddress.orEmpty(),
+                                            response,
+                                        )
+                                    }
+                                }.onSuccess {
+                                    secureRevision++
+                                    Toast.makeText(
+                                        context,
+                                        "New identity ready for safety-code verification",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }.onFailure {
+                                    Toast.makeText(
+                                        context,
+                                        "Identity review failed: ${it.message}",
+                                        Toast.LENGTH_LONG,
+                                    ).show()
+                                }
+                            },
+                            onRejectIdentityChange = {
+                                SecureRepository.rejectIdentityChange(context, conversation.smsAddress.orEmpty())
+                                secureRevision++
+                            },
                         )
                     }
                 }
@@ -3326,6 +3359,8 @@ private fun SecurePairingCard(
     onInvite: () -> Unit,
     onAccept: () -> Unit,
     onVerify: () -> Unit,
+    onAcceptIdentityChange: () -> Unit,
+    onRejectIdentityChange: () -> Unit,
 ) {
     val active = peerState in setOf(SecurePeerState.ACTIVE_UNVERIFIED, SecurePeerState.VERIFIED)
     Card(
@@ -3342,6 +3377,7 @@ private fun SecurePairingCard(
                     SecurePeerState.INVITE_RECEIVED -> "SECURE PING // INVITE DETECTED"
                     SecurePeerState.ACTIVE_UNVERIFIED -> "SECURE BETA // KEY UNVERIFIED"
                     SecurePeerState.VERIFIED -> "SECURE BETA // IDENTITY VERIFIED"
+                    SecurePeerState.IDENTITY_CHANGE_PENDING -> "SECURE WARNING // IDENTITY CHANGED"
                 },
                 color = Violet,
                 fontFamily = FontFamily.Monospace,
@@ -3355,13 +3391,14 @@ private fun SecurePairingCard(
                     SecurePeerState.INVITE_RECEIVED -> "Accept to return this phone's public keys and enable encrypted SMS capsules."
                     SecurePeerState.ACTIVE_UNVERIFIED -> "Compare this safety code on both phones before marking the identity verified."
                     SecurePeerState.VERIFIED -> "Messages use authenticated HPKE capsules over carrier SMS. Carrier charges may apply."
+                    SecurePeerState.IDENTITY_CHANGE_PENDING -> "A different identity arrived. Secure sending is locked. Compare the new safety code before trusting it."
                 },
                 color = Mist,
                 fontSize = 13.sp,
                 lineHeight = 18.sp,
                 modifier = Modifier.padding(top = 7.dp),
             )
-            if (active && safetyNumber != null) {
+            if ((active || peerState == SecurePeerState.IDENTITY_CHANGE_PENDING) && safetyNumber != null) {
                 Text(
                     safetyNumber,
                     color = Toxic,
@@ -3399,6 +3436,18 @@ private fun SecurePairingCard(
                     modifier = Modifier.padding(top = 11.dp),
                 ) { Text("CODES MATCH — VERIFY", fontWeight = FontWeight.Black) }
                 SecurePeerState.VERIFIED -> Unit
+                SecurePeerState.IDENTITY_CHANGE_PENDING -> Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(top = 11.dp),
+                ) {
+                    Button(
+                        onClick = onAcceptIdentityChange,
+                        colors = ButtonDefaults.buttonColors(containerColor = Amber, contentColor = Void),
+                    ) { Text("REVIEW NEW ID", fontWeight = FontWeight.Black) }
+                    TextButton(onClick = onRejectIdentityChange) {
+                        Text("KEEP OLD ID", color = Mist)
+                    }
+                }
             }
         }
     }
@@ -3687,6 +3736,7 @@ private fun securePeerLabel(state: SecurePeerState): String = when (state) {
     SecurePeerState.INVITE_RECEIVED -> "INVITE RECEIVED"
     SecurePeerState.ACTIVE_UNVERIFIED -> "VERIFY SAFETY CODE"
     SecurePeerState.VERIFIED -> "IDENTITY VERIFIED"
+    SecurePeerState.IDENTITY_CHANGE_PENDING -> "IDENTITY CHANGED"
 }
 
 private fun securePeerPreview(state: SecurePeerState): String = when (state) {
@@ -3695,6 +3745,7 @@ private fun securePeerPreview(state: SecurePeerState): String = when (state) {
     SecurePeerState.INVITE_RECEIVED -> "Secure invitation waiting for acceptance"
     SecurePeerState.ACTIVE_UNVERIFIED -> "Compare the safety code on both phones"
     SecurePeerState.VERIFIED -> "Secure Ping channel ready"
+    SecurePeerState.IDENTITY_CHANGE_PENDING -> "Secure sending locked until identity review"
 }
 
 @Composable

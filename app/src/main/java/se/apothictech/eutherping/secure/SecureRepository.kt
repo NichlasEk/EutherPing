@@ -38,6 +38,7 @@ enum class SecurePeerState {
     INVITE_RECEIVED,
     ACTIVE_UNVERIFIED,
     VERIFIED,
+    IDENTITY_CHANGE_PENDING,
 }
 
 data class SecurePeer(
@@ -46,6 +47,10 @@ data class SecurePeer(
     val signingPublicKey: ByteArray?,
     val fingerprint: String?,
     val state: SecurePeerState,
+    val pendingEncryptionPublicKey: ByteArray? = null,
+    val pendingSigningPublicKey: ByteArray? = null,
+    val pendingFingerprint: String? = null,
+    val pendingRequiresAcceptance: Boolean = false,
 ) {
     val hasKeys: Boolean
         get() = encryptionPublicKey != null &&
@@ -169,6 +174,10 @@ object SecureRepository {
                 signingPublicKey = json.optString("s").takeIf(String::isNotBlank)?.let(::decode),
                 fingerprint = json.optString("f").takeIf(String::isNotBlank),
                 state = SecurePeerState.valueOf(json.getString("state")),
+                pendingEncryptionPublicKey = json.optString("pe").takeIf(String::isNotBlank)?.let(::decode),
+                pendingSigningPublicKey = json.optString("ps").takeIf(String::isNotBlank)?.let(::decode),
+                pendingFingerprint = json.optString("pf").takeIf(String::isNotBlank),
+                pendingRequiresAcceptance = json.optBoolean("pa", false),
             )
         }.getOrElse { SecurePeer(normalized, null, null, null, SecurePeerState.NONE) }
     }
@@ -176,6 +185,8 @@ object SecureRepository {
     fun createInvitation(context: Context, address: String): Result<String> = runCatching {
         val normalized = normalizeAddress(address)
         require(normalized.isNotBlank()) { "A destination number is required" }
+        val current = peer(context, normalized)
+        check(!current.hasKeys) { "A Secure identity already exists for this contact" }
         val wire = encodeBundle(INVITE_PREFIX, identity(context))
         savePeer(
             context,
@@ -201,6 +212,48 @@ object SecureRepository {
         }
     }
 
+    fun acceptIdentityChange(context: Context, address: String): Result<String?> = runCatching {
+        val current = peer(context, address)
+        check(current.state == SecurePeerState.IDENTITY_CHANGE_PENDING) {
+            "No Secure identity change is waiting"
+        }
+        val encryption = checkNotNull(current.pendingEncryptionPublicKey)
+        val signing = checkNotNull(current.pendingSigningPublicKey)
+        val fingerprint = checkNotNull(current.pendingFingerprint)
+        val response = if (current.pendingRequiresAcceptance) {
+            encodeBundle(ACCEPT_PREFIX, identity(context))
+        } else {
+            null
+        }
+        savePeer(
+            context,
+            SecurePeer(
+                address = current.address,
+                encryptionPublicKey = encryption,
+                signingPublicKey = signing,
+                fingerprint = fingerprint,
+                state = SecurePeerState.ACTIVE_UNVERIFIED,
+            ),
+        )
+        response
+    }
+
+    fun rejectIdentityChange(context: Context, address: String) {
+        val current = peer(context, address)
+        if (current.state == SecurePeerState.IDENTITY_CHANGE_PENDING && current.hasKeys) {
+            savePeer(
+                context,
+                current.copy(
+                    state = SecurePeerState.VERIFIED,
+                    pendingEncryptionPublicKey = null,
+                    pendingSigningPublicKey = null,
+                    pendingFingerprint = null,
+                    pendingRequiresAcceptance = false,
+                ),
+            )
+        }
+    }
+
     fun handleIncomingControl(context: Context, address: String, body: String): Boolean {
         val (prefix, isAcceptance) = when {
             body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX to false
@@ -212,24 +265,53 @@ object SecureRepository {
         val bundle = runCatching { decodeBundle(body, prefix) }.getOrNull()
             ?: return false
         val current = peer(context, address)
-        val sameVerifiedIdentity = current.state == SecurePeerState.VERIFIED &&
-            current.fingerprint == bundle.fingerprint
-        val nextState = when {
-            sameVerifiedIdentity -> SecurePeerState.VERIFIED
-            isAcceptance -> SecurePeerState.ACTIVE_UNVERIFIED
-            else -> SecurePeerState.INVITE_RECEIVED
-        }
-        savePeer(
-            context,
-            SecurePeer(
-                address = normalizeAddress(address),
-                encryptionPublicKey = bundle.encryptionPublicKey,
-                signingPublicKey = bundle.signingPublicKey,
-                fingerprint = bundle.fingerprint,
-                state = nextState,
-            ),
+        val resolved = resolveIncomingIdentity(
+            current = current,
+            encryptionPublicKey = bundle.encryptionPublicKey,
+            signingPublicKey = bundle.signingPublicKey,
+            fingerprint = bundle.fingerprint,
+            isAcceptance = isAcceptance,
         )
+        savePeer(context, resolved)
         return true
+    }
+
+    internal fun resolveIncomingIdentity(
+        current: SecurePeer,
+        encryptionPublicKey: ByteArray,
+        signingPublicKey: ByteArray,
+        fingerprint: String,
+        isAcceptance: Boolean,
+    ): SecurePeer {
+        if (current.fingerprint == fingerprint && current.hasKeys) {
+            return current
+        }
+        if (current.state == SecurePeerState.IDENTITY_CHANGE_PENDING) {
+            return current
+        }
+        if (current.state == SecurePeerState.VERIFIED && current.hasKeys) {
+            return current.copy(
+                state = SecurePeerState.IDENTITY_CHANGE_PENDING,
+                pendingEncryptionPublicKey = encryptionPublicKey,
+                pendingSigningPublicKey = signingPublicKey,
+                pendingFingerprint = fingerprint,
+                pendingRequiresAcceptance = !isAcceptance,
+            )
+        }
+        if (current.hasKeys) {
+            return current
+        }
+        return SecurePeer(
+            address = current.address,
+            encryptionPublicKey = encryptionPublicKey,
+            signingPublicKey = signingPublicKey,
+            fingerprint = fingerprint,
+            state = if (isAcceptance) {
+                SecurePeerState.ACTIVE_UNVERIFIED
+            } else {
+                SecurePeerState.INVITE_RECEIVED
+            },
+        )
     }
 
     fun encryptMessage(context: Context, address: String, plaintext: String): Result<String> = runCatching {
@@ -479,7 +561,12 @@ object SecureRepository {
     }
 
     fun safetyNumber(context: Context, address: String): String? {
-        val remote = peer(context, address).fingerprint ?: return null
+        val peer = peer(context, address)
+        val remote = if (peer.state == SecurePeerState.IDENTITY_CHANGE_PENDING) {
+            peer.pendingFingerprint
+        } else {
+            peer.fingerprint
+        } ?: return null
         val local = localFingerprint(context)
         val ordered = listOf(local, remote).sorted().joinToString("")
         val digest = sha256(ordered.toByteArray(UTF_8)).take(12)
@@ -798,6 +885,10 @@ object SecureRepository {
             .put("s", peer.signingPublicKey?.let(::encode).orEmpty())
             .put("f", peer.fingerprint.orEmpty())
             .put("state", peer.state.name)
+            .put("pe", peer.pendingEncryptionPublicKey?.let(::encode).orEmpty())
+            .put("ps", peer.pendingSigningPublicKey?.let(::encode).orEmpty())
+            .put("pf", peer.pendingFingerprint.orEmpty())
+            .put("pa", peer.pendingRequiresAcceptance)
         context.getSharedPreferences(PEER_PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(peerKey(peer.address), json.toString())

@@ -165,3 +165,10 @@ as complete.
   ciphertext under an accepted ID, frames older than 30 days, and frames over 24
   hours ahead are rejected before Telephony persistence. Pairing controls and
   the reviewed ratcheting-protocol migration remain unfinished.
+- `0.8.7`: unexpected identity replacement is fail-closed. A different pairing
+  identity can no longer overwrite an already verified peer: the trusted keys
+  remain stored separately, Secure sending locks, and the pending fingerprint
+  must be explicitly rejected or promoted into a fresh unverified safety-code
+  flow. Duplicate and third replacement controls are idempotent and cannot
+  rotate either saved identity. Timestamped pairing-control framing and the
+  reviewed ratcheting-protocol migration remain unfinished.
