@@ -153,6 +153,31 @@ class CarrierMmsRepositoryTest {
         )
         CarrierMmsRepository.saveStoredImage(context, attachment, savedUri).getOrThrow()
         assertTrue("Saved MMS image was empty", savedFile.length() > 0L)
+
+        val longText = "Automatic text MMS ".repeat(18).trim()
+        assertTrue(
+            "Long carrier text did not exceed one SMS segment",
+            SmsRepository.smsPartCount(context, longText) > 1,
+        )
+        assertTrue(
+            "Short carrier text unexpectedly exceeded one SMS segment",
+            SmsRepository.smsPartCount(context, "Short SMS") == 1,
+        )
+        val textMmsUri = CarrierMmsRepository.sendText(
+            context,
+            "15551234567",
+            longText,
+        ).getOrThrow()
+        context.contentResolver.query(textMmsUri, arrayOf("_id", "msg_box"), null, null, null)?.use {
+            assertTrue("Text MMS was not persisted in Android's provider", it.moveToFirst())
+        }
+        val textMms = SmsRepository.loadMessages(
+            context,
+            mmsConversation.thread.threadId,
+            mmsConversation.thread.address,
+        ).firstOrNull { it.isMms && it.body == longText }
+        assertNotNull("Conversation history did not expose the automatic text MMS", textMms)
+        assertTrue("Text-only MMS unexpectedly exposed an image", textMms?.mmsAttachment == null)
     }
 
     @Test

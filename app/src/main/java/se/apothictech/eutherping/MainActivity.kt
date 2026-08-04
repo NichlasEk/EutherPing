@@ -1636,13 +1636,18 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             }
         } else if (text.isNotEmpty()) {
             if (isRealSms) {
+                val automaticTextMms = !secureLane && SmsRepository.smsPartCount(context, text) > 1
                 val outgoing = if (secureLane) {
                     SecureRepository.encryptMessage(context, conversation.smsAddress.orEmpty(), text)
                 } else {
                     Result.success(text)
                 }
                 outgoing.flatMap { wireBody ->
-                    SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), wireBody)
+                    if (automaticTextMms) {
+                        CarrierMmsRepository.sendText(context, conversation.smsAddress.orEmpty(), wireBody)
+                    } else {
+                        SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), wireBody)
+                    }
                 }
                     .onSuccess {
                         draft = ""
@@ -1651,6 +1656,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                             context,
                             if (secureLane) {
                                 "Encrypted Secure Ping queued"
+                            } else if (automaticTextMms) {
+                                "Long message queued as MMS"
                             } else {
                                 "SMS queued"
                             },
@@ -1918,7 +1925,13 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         } else {
                             Result.success(message.text)
                         }
-                        body.flatMap { SmsRepository.sendText(context, address, it) }
+                        body.flatMap {
+                            if (!secureLane && SmsRepository.smsPartCount(context, it) > 1) {
+                                CarrierMmsRepository.sendText(context, address, it)
+                            } else {
+                                SmsRepository.sendText(context, address, it)
+                            }
+                        }
                     }
                     result.onSuccess {
                         Toast.makeText(context, "Message forwarded", Toast.LENGTH_SHORT).show()
@@ -2285,7 +2298,10 @@ private fun MessageBubble(
                     )
                 }
             }
-            if (message.isMms) {
+            if (
+                message.carrierMmsAttachment != null ||
+                (message.isMms && message.text == "📷 Carrier MMS")
+            ) {
                 val attachment = message.carrierMmsAttachment
                 val preview by produceState<Bitmap?>(
                     initialValue = null,
@@ -2374,7 +2390,7 @@ private fun MessageBubble(
                         append(
                             when {
                                 message.transport == Transport.SECURE -> " // ECHO"
-                                message.carrierMmsAttachment != null -> " // MMS // CARRIER"
+                                message.isMms -> " // MMS // CARRIER"
                                 else -> " // CELL"
                             },
                         )

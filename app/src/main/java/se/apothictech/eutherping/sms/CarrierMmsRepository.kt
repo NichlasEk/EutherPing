@@ -152,6 +152,40 @@ object CarrierMmsRepository {
             })
             setMessageSize(image.bytes.size.toLong() + captionBytes.size)
         }
+        sendRequest(context, manager, request)
+    }
+
+    fun sendText(
+        context: Context,
+        address: String,
+        text: String,
+    ): Result<Uri> = runCatching {
+        check(SmsRepository.isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
+        check(SmsRepository.hasSmsPermissions(context)) { "SMS permissions are not granted" }
+        require(address.isNotBlank()) { "A destination number is required" }
+        val normalizedText = text.trim()
+        require(normalizedText.isNotBlank()) { "The message is empty" }
+
+        val manager = smsManager(context)
+        val textBytes = normalizedText.toByteArray(Charsets.UTF_8)
+        require(textBytes.size < carrierPayloadLimit(manager) - 8_192) {
+            "The text is too large for this carrier's MMS limit"
+        }
+        val request = SendReq().apply {
+            setTo(arrayOf(EncodedStringValue(address)))
+            setDate(System.currentTimeMillis() / 1000L)
+            setDeliveryReport(PduHeaders.VALUE_NO)
+            setReadReport(PduHeaders.VALUE_NO)
+            setPriority(PduHeaders.PRIORITY_NORMAL)
+            setExpiry(7L * 24 * 60 * 60)
+            setMessageClass(PduHeaders.MESSAGE_CLASS_PERSONAL_STR.toByteArray())
+            setBody(PduBody().apply { addPart(textPart(normalizedText)) })
+            setMessageSize(textBytes.size.toLong())
+        }
+        sendRequest(context, manager, request)
+    }
+
+    private fun sendRequest(context: Context, manager: SmsManager, request: SendReq): Uri {
         val messageUri = PduPersister.getPduPersister(context).persist(
             request,
             Telephony.Mms.Outbox.CONTENT_URI,
@@ -180,7 +214,7 @@ object CarrierMmsRepository {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         manager.sendMultimediaMessage(context, contentUri, null, null, pending)
-        messageUri
+        return messageUri
     }
 
     fun receiveNotification(context: Context, intent: Intent): Result<Unit> = runCatching {

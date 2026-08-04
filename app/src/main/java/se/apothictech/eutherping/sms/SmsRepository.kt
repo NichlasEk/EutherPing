@@ -90,6 +90,11 @@ object SmsRepository {
         Telephony.Sms.getDefaultSmsPackage(context) == context.packageName
     }
 
+    fun smsPartCount(context: Context, body: String): Int {
+        if (body.isEmpty()) return 0
+        return smsManager(context).divideMessage(body).size
+    }
+
     fun hasSmsPermissions(context: Context): Boolean = requiredPermissions
         .filterNot { it == "android.permission.POST_NOTIFICATIONS" }
         .all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }
@@ -751,14 +756,7 @@ object SmsRepository {
             context.contentResolver.insert(Telephony.Sms.Outbox.CONTENT_URI, values),
         ) { "Could not persist outgoing SMS" }
 
-        @Suppress("DEPRECATION")
-        val smsManager = if (Build.VERSION.SDK_INT >= 31) {
-            checkNotNull(context.getSystemService(SmsManager::class.java)) {
-                "SMS service is unavailable"
-            }
-        } else {
-            SmsManager.getDefault()
-        }
+        val smsManager = smsManager(context)
         val parts = smsManager.divideMessage(body)
         val sentIntents = ArrayList<PendingIntent>(parts.size)
         val deliveredIntents = ArrayList<PendingIntent>(parts.size)
@@ -772,6 +770,15 @@ object SmsRepository {
             smsManager.sendMultipartTextMessage(address, null, parts, sentIntents, deliveredIntents)
         }
         messageUri
+    }
+
+    @Suppress("DEPRECATION")
+    private fun smsManager(context: Context): SmsManager = if (Build.VERSION.SDK_INT >= 31) {
+        checkNotNull(context.getSystemService(SmsManager::class.java)) {
+            "SMS service is unavailable"
+        }
+    } else {
+        SmsManager.getDefault()
     }
 
     private fun statusIntent(
