@@ -4,7 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.provider.Telephony
+import android.util.Log
 import se.apothictech.eutherping.secure.SecureRepository
+import se.apothictech.eutherping.secure.SecureFrameAcceptance
 
 class SmsReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
@@ -17,6 +19,18 @@ class SmsReceiver : BroadcastReceiver() {
         val body = parts.joinToString(separator = "") { it.displayMessageBody.orEmpty() }
         val timestamp = parts.minOfOrNull { it.timestampMillis } ?: System.currentTimeMillis()
         SecureRepository.handleIncomingControl(context, address, body)
+        when (SecureRepository.acceptIncomingAuthenticatedFrame(context, address, body)) {
+            SecureFrameAcceptance.DUPLICATE,
+            SecureFrameAcceptance.STALE,
+            SecureFrameAcceptance.INVALID,
+            -> {
+                Log.w("EutherPingSecure", "Rejected duplicate, stale, or invalid Secure Ping frame")
+                return
+            }
+            SecureFrameAcceptance.ACCEPTED,
+            SecureFrameAcceptance.NOT_AUTHENTICATED_FRAME,
+            -> Unit
+        }
         val messageUri = SmsRepository.persistIncoming(context, address, body, timestamp)
         IncomingMessageNotifier.show(
             context = context,

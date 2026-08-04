@@ -7,6 +7,7 @@ import org.junit.Test
 import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.secure.SecureAttachmentRepository
 import se.apothictech.eutherping.secure.SecureAttachmentDescriptor
+import se.apothictech.eutherping.secure.SecureReplayRepository
 import java.net.SocketException
 
 class TransportTest {
@@ -64,6 +65,15 @@ class TransportTest {
                 ),
             ),
         )
+    }
+
+    @Test
+    fun `secure replay window accepts bounded clock skew only`() {
+        val now = 1_800_000_000_000L
+        assertTrue(SecureReplayRepository.isFresh(now - 30L * 24 * 60 * 60 * 1000, now))
+        assertFalse(SecureReplayRepository.isFresh(now - 30L * 24 * 60 * 60 * 1000 - 1, now))
+        assertTrue(SecureReplayRepository.isFresh(now + 24L * 60 * 60 * 1000, now))
+        assertFalse(SecureReplayRepository.isFresh(now + 24L * 60 * 60 * 1000 + 1, now))
     }
 
     private fun descriptor(

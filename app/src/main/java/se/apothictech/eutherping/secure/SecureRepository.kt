@@ -422,6 +422,41 @@ object SecureRepository {
         else -> body
     }
 
+    fun acceptIncomingAuthenticatedFrame(
+        context: Context,
+        address: String,
+        body: String,
+        now: Long = System.currentTimeMillis(),
+    ): SecureFrameAcceptance {
+        val kind = when {
+            body.startsWith(MESSAGE_PREFIX) -> "message"
+            body.startsWith(ATTACHMENT_PREFIX) -> "attachment"
+            else -> return SecureFrameAcceptance.NOT_AUTHENTICATED_FRAME
+        }
+        val authenticated = runCatching {
+            val outer = if (kind == "message") parseMessageOuter(body) else parseAttachmentOuter(body)
+            val payload = decryptAndVerifyIncomingPayload(context, address, outer)
+            if (kind == "message") {
+                check(payload.getInt("v") == 1)
+            } else {
+                check(payload.getInt("v") in 1..2)
+                check(payload.getString("kind") == "file")
+            }
+            val id = payload.getString("id")
+            check(id == outer.getString("id"))
+            AuthenticatedSecureFrame(
+                kind = kind,
+                id = id,
+                timestamp = payload.getLong("ts"),
+                senderFingerprint = payload.getString("from"),
+                ciphertextSha256 = sha256(decode(outer.getString("c"))).joinToString("") {
+                    "%02x".format(it)
+                },
+            )
+        }.getOrElse { return SecureFrameAcceptance.INVALID }
+        return SecureReplayRepository.accept(context, authenticated, now)
+    }
+
     fun decodeAttachmentOffer(
         context: Context,
         address: String,
@@ -430,25 +465,7 @@ object SecureRepository {
     ): Result<SecureAttachmentDescriptor> = runCatching {
         val outer = parseAttachmentOuter(body)
         val payloadBytes = if (incoming) {
-            val current = peer(context, address)
-            check(current.signingPublicKey != null && current.fingerprint != null) {
-                "Unknown Secure Ping sender"
-            }
-            val signedPayloadBytes = hpkeKeyset(context).getPrimitive(HybridDecrypt::class.java).decrypt(
-                decode(outer.getString("c")),
-                contextInfo(localFingerprint(context)),
-            )
-            val signedPayload = JSONObject(String(signedPayloadBytes, UTF_8))
-            val verifiedPayload = decode(signedPayload.getString("p"))
-            val publicSigning = KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(current.signingPublicKey))
-            publicSigning.getPrimitive(PublicKeyVerify::class.java).verify(
-                decode(signedPayload.getString("s")),
-                verifiedPayload,
-            )
-            val verifiedJson = JSONObject(String(verifiedPayload, UTF_8))
-            check(verifiedJson.getString("from") == current.fingerprint)
-            check(verifiedJson.getString("to") == localFingerprint(context))
-            verifiedPayload
+            decryptAndVerifyIncomingPayload(context, address, outer).toString().toByteArray(UTF_8)
         } else {
             val stored = loadOutgoing(context, outer.getString("id"))
                 ?: error("Attachment metadata is unavailable on this installation")
@@ -475,10 +492,28 @@ object SecureRepository {
         body: String,
     ): Result<SecureDecodedMessage> = runCatching {
         val current = peer(context, address)
+        val outer = parseMessageOuter(body)
+        val payload = decryptAndVerifyIncomingPayload(context, address, outer)
+        check(payload.getInt("v") == 1)
+        check(payload.getString("id") == outer.getString("id"))
+        check(payload.getString("from") == current.fingerprint)
+        check(payload.getString("to") == localFingerprint(context))
+        SecureDecodedMessage(
+            text = payload.getString("text"),
+            isSecure = true,
+            verified = current.state == SecurePeerState.VERIFIED,
+        )
+    }
+
+    private fun decryptAndVerifyIncomingPayload(
+        context: Context,
+        address: String,
+        outer: JSONObject,
+    ): JSONObject {
+        val current = peer(context, address)
         check(current.signingPublicKey != null && current.fingerprint != null) {
             "Unknown Secure Ping sender"
         }
-        val outer = parseMessageOuter(body)
         val signedPayloadBytes = hpkeKeyset(context).getPrimitive(HybridDecrypt::class.java).decrypt(
             decode(outer.getString("c")),
             contextInfo(localFingerprint(context)),
@@ -489,15 +524,9 @@ object SecureRepository {
         val publicSigning = KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(current.signingPublicKey))
         publicSigning.getPrimitive(PublicKeyVerify::class.java).verify(signature, payloadBytes)
         val payload = JSONObject(String(payloadBytes, UTF_8))
-        check(payload.getInt("v") == 1)
-        check(payload.getString("id") == outer.getString("id"))
         check(payload.getString("from") == current.fingerprint)
         check(payload.getString("to") == localFingerprint(context))
-        SecureDecodedMessage(
-            text = payload.getString("text"),
-            isSecure = true,
-            verified = current.state == SecurePeerState.VERIFIED,
-        )
+        return payload
     }
 
     private fun parseMessageOuter(body: String): JSONObject {

@@ -1,5 +1,13 @@
 # EutherPing
 
+Version 0.8.6 rejects replayed, stale, and conflicting authenticated Secure
+message and attachment frames before they enter Android message history. The
+private replay index stores only bounded frame hashes and acceptance times: no
+message text, attachment names, keys, phone numbers, or ciphertext. Exact
+duplicates are ignored without another notification; signed frames older than
+30 days or more than 24 hours in the future fail closed. Pairing control capsules
+remain outside this first authenticated-frame replay slice.
+
 Version 0.8.5 hardens Secure Vessels storage. Encrypted attachment payloads stay
 in a dedicated private app directory and are no longer decrypted merely because
 a conversation is opened. A verified image is downloaded as ciphertext and is
@@ -44,7 +52,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.5`; the detailed `0.8.0` overview below describes
+The current release is `0.8.6`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:

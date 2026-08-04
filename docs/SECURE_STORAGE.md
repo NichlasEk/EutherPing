@@ -13,6 +13,7 @@ that the current Secure Beta framing is a reviewed ratcheting protocol.
 | Sent Secure message plaintext and drafts | Private app SharedPreferences | Tink AES-GCM ciphertext under Android Keystore |
 | Secure attachment payload | `filesDir/secure_attachments/{incoming,outgoing}` | AES-256-GCM ciphertext (`.enc`) |
 | Conversation startup index | Private app file | Neutral Vessel placeholder; never Secure plaintext |
+| Accepted-frame replay index | Private app SharedPreferences | Bounded hashes and acceptance times only |
 | Inline Secure image preview | App memory after explicit tap | Authenticated decoded bitmap; recycled with UI |
 | Explicit external open | Private app cache through FileProvider | Temporary plaintext, deleted after ten minutes or next start |
 | Explicit save | User-selected document destination | Plaintext by deliberate user action; no longer Vessel-protected |
@@ -40,6 +41,15 @@ destination selected by the user, then deletes it in `finally`.
 
 Cloud backup and device-to-device transfer are disabled for the entire app.
 
+Authenticated message and attachment frames are admitted once. A private replay
+index hashes the peer fingerprint, frame kind, and random frame ID, then stores
+only that derived key, the ciphertext SHA-256, and local acceptance time. It is
+bounded to 4,096 records with 90-day retention. Exact network replays, conflicting
+ciphertext under an accepted ID, signed frames older than 30 days, and frames
+more than 24 hours ahead of the local clock are rejected before Telephony
+persistence. This is an anti-replay layer for the current beta framing, not a
+substitute for the planned reviewed ratcheting protocol.
+
 ## Automated evidence
 
 `SecureAttachmentRepositoryTest` verifies that an image preview succeeds
@@ -47,8 +57,11 @@ without leaving preview/save files, corrupted ciphertext fails authentication,
 and every transient Secure cache directory is cleaned at startup.
 `ConversationIndexCacheTest` verifies that a supplied Secure plaintext preview
 is replaced by the neutral encrypted placeholder before the index is written.
+`SecureReplayRepositoryTest` verifies first acceptance, exact replay rejection,
+ID/ciphertext conflict rejection, freshness windows, and non-recording of stale
+frames against Android's real private app storage.
 
-The remaining Phase 6 work is replay/staleness rejection plus migration to a
-reviewed asynchronous session implementation with forward secrecy and
-post-compromise security. Until that is implemented and externally reviewed,
-the product remains labelled **Secure Beta**.
+The remaining Phase 6 work is migration to a reviewed asynchronous session
+implementation with forward secrecy and post-compromise security. Until that is
+implemented and externally reviewed, the product remains labelled **Secure
+Beta**.

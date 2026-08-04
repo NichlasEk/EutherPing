@@ -151,3 +151,8 @@ as complete.
   open/save copies are private and crash leftovers are cleared at startup.
   Instrumentation covers memory preview, tamper rejection and cleanup. Replay
   protection and migration to a reviewed session protocol remain unfinished.
+- `0.8.6`: authenticated Secure messages and attachment offers are admitted once
+  through a bounded private replay index. Exact duplicate frames, conflicting
+  ciphertext under an accepted ID, frames older than 30 days, and frames over 24
+  hours ahead are rejected before Telephony persistence. Pairing controls and
+  the reviewed ratcheting-protocol migration remain unfinished.
