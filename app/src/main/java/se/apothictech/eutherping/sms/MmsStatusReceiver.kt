@@ -11,6 +11,12 @@ class MmsStatusReceiver : BroadcastReceiver() {
         if (intent.action != CarrierMmsRepository.ACTION_MMS_SENT) return
         if (resultCode != android.app.Activity.RESULT_OK) {
             Log.e("EutherPingMms", "Carrier MMS send failed with result code $resultCode")
+            SmsRepository.rememberCarrierFailure(
+                context,
+                intent.getStringExtra(CarrierMmsRepository.EXTRA_MMS_URI).orEmpty(),
+                resultCode,
+                intent.getIntExtra(android.telephony.SmsManager.EXTRA_MMS_HTTP_STATUS, 0),
+            )
         }
         CarrierMmsRepository.updateSentState(
             context,

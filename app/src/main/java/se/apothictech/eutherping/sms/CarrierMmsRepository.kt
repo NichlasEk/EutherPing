@@ -194,6 +194,43 @@ object CarrierMmsRepository {
             null,
             manager.subscriptionId,
         )
+        transmitPersistedRequest(context, manager, request, messageUri)
+        return messageUri
+    }
+
+    fun retryFailedMms(context: Context, messageId: Long): Result<Uri> = runCatching {
+        check(SmsRepository.isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
+        val providerId = -messageId - 1
+        require(providerId >= 0) { "Invalid carrier MMS identifier" }
+        val messageUri = Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, providerId.toString())
+        val request = PduPersister.getPduPersister(context).load(messageUri) as? SendReq
+            ?: error("The failed carrier MMS can no longer be reconstructed")
+        val currentBox = context.contentResolver.query(
+            messageUri,
+            arrayOf(Telephony.Mms.MESSAGE_BOX),
+            null,
+            null,
+            null,
+        )?.use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else null }
+        check(currentBox == Telephony.Mms.MESSAGE_BOX_FAILED) { "Only a failed carrier MMS can be retried" }
+        context.contentResolver.update(
+            messageUri,
+            ContentValues().apply { put(Telephony.Mms.MESSAGE_BOX, Telephony.Mms.MESSAGE_BOX_OUTBOX) },
+            null,
+            null,
+        )
+        SmsRepository.clearCarrierFailure(context, messageUri)
+        transmitPersistedRequest(context, smsManager(context), request, messageUri)
+        context.sendBroadcast(Intent(SmsRepository.ACTION_SMS_CHANGED).setPackage(context.packageName))
+        messageUri
+    }
+
+    private fun transmitPersistedRequest(
+        context: Context,
+        manager: SmsManager,
+        request: SendReq,
+        messageUri: Uri,
+    ) {
         val pdu = checkNotNull(PduComposer(context, request).make()) { "Could not compose carrier MMS" }
         val directory = File(context.cacheDir, MMS_CACHE).apply { mkdirs() }
         val pduFile = File(directory, "send-${UUID.randomUUID()}.pdu").apply { writeBytes(pdu) }
@@ -213,8 +250,13 @@ object CarrierMmsRepository {
             statusIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        manager.sendMultimediaMessage(context, contentUri, null, null, pending)
-        return messageUri
+        try {
+            manager.sendMultimediaMessage(context, contentUri, null, null, pending)
+        } catch (error: Throwable) {
+            pduFile.delete()
+            updateSentState(context, messageUri.toString(), Activity.RESULT_CANCELED)
+            throw error
+        }
     }
 
     fun receiveNotification(context: Context, intent: Intent): Result<Unit> = runCatching {

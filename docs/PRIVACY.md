@@ -1,6 +1,6 @@
 # EutherPing privacy policy draft
 
-Last updated: 2026-08-02
+Last updated: 2026-08-04
 
 This repository document is the source draft for EutherPing's future public and in-app privacy policy. A stable public URL and an in-app link are required before a Google Play submission.
 
@@ -12,6 +12,7 @@ This repository document is the source draft for EutherPing's future public and 
 - Local-network state and a local IP address when a verified Vessel sends or receives a direct encrypted attachment.
 - Already paired Bluetooth device names when the user enables the optional Nearby devices fallback. EutherPing does not request Bluetooth scanning or location.
 - Cryptographic identity keys created for Secure Ping and protected using Android Keystore.
+- An Android biometric authentication result when the optional Vessel seal is enabled. EutherPing never receives fingerprint or biometric data.
 
 ## How the data is used
 
@@ -31,7 +32,7 @@ Contacts stay on the device. EutherPing does not upload the address book. Select
 
 ## Collection, sharing, and remote services
 
-EutherPing 0.7.0 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. A private app file caches ordinary conversation previews and non-secret Vessel metadata for fast startup; decrypted Secure Ping text is deliberately replaced by a neutral placeholder in that index. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, to the intended paired phone as encrypted Bluetooth attachment ciphertext, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
+EutherPing 0.8.0 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. A private app file caches ordinary conversation previews and non-secret Vessel metadata for fast startup; decrypted Secure Ping text is deliberately replaced by a neutral placeholder in that index. The Vessel seal's enabled/disabled choice is stored in local app preferences, while authentication is handled entirely by Android. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, to the intended paired phone as encrypted Bluetooth attachment ciphertext, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
 
 Direct Wi-Fi and Bluetooth attachment transfer do not send data to an EutherPing backend. The peer receives ciphertext and can decrypt it only with the intended verified Vessel identity.
 

@@ -35,9 +35,38 @@ data class SmsEntry(
     val incoming: Boolean,
     val read: Boolean,
     val status: Int,
+    val box: Int,
     val isMms: Boolean = false,
     val mmsAttachment: CarrierMmsAttachment? = null,
 )
+
+enum class MessageDeliveryState(val label: String) {
+    SENDING("SENDING"),
+    SENT("SENT"),
+    DELIVERED("DELIVERED"),
+    FAILED("FAILED"),
+}
+
+fun SmsEntry.deliveryState(): MessageDeliveryState? {
+    if (incoming) return null
+    return if (isMms) {
+        when (box) {
+            Telephony.Mms.MESSAGE_BOX_OUTBOX -> MessageDeliveryState.SENDING
+            Telephony.Mms.MESSAGE_BOX_FAILED -> MessageDeliveryState.FAILED
+            Telephony.Mms.MESSAGE_BOX_SENT -> MessageDeliveryState.SENT
+            else -> MessageDeliveryState.SENDING
+        }
+    } else {
+        when {
+            box == Telephony.Sms.MESSAGE_TYPE_FAILED || status == Telephony.Sms.STATUS_FAILED ->
+                MessageDeliveryState.FAILED
+            box == Telephony.Sms.MESSAGE_TYPE_OUTBOX || status == Telephony.Sms.STATUS_PENDING ->
+                MessageDeliveryState.SENDING
+            status == Telephony.Sms.STATUS_COMPLETE -> MessageDeliveryState.DELIVERED
+            else -> MessageDeliveryState.SENT
+        }
+    }
+}
 
 data class SmsConversationSnapshot(
     val thread: SmsThread,
@@ -74,6 +103,9 @@ object SmsRepository {
     const val ACTION_SMS_SENT = "se.apothictech.eutherping.SMS_SENT"
     const val ACTION_SMS_DELIVERED = "se.apothictech.eutherping.SMS_DELIVERED"
     const val EXTRA_MESSAGE_URI = "message_uri"
+    const val EXTRA_PART_INDEX = "part_index"
+    const val EXTRA_PART_COUNT = "part_count"
+    private const val STATUS_PREFERENCES = "sms_send_status"
 
     val requiredPermissions = buildList {
         add(Manifest.permission.READ_SMS)
@@ -233,6 +265,7 @@ object SmsRepository {
                     incoming = incoming,
                     read = read,
                     status = cursor.getInt(statusIndex),
+                    box = type,
                 )
                 val index = threads.getOrPut(threadId, ::MutableIndex)
                 val address = cursor.getString(addressIndex).orEmpty()
@@ -270,6 +303,7 @@ object SmsRepository {
                 incoming = mms.incoming,
                 read = mms.read,
                 status = mms.messageBox,
+                box = mms.messageBox,
                 isMms = true,
             )
             if (index.latestOrdinary == null || mms.timestamp >= index.latestOrdinary!!.timestamp) {
@@ -344,6 +378,7 @@ object SmsRepository {
                     incoming = incoming,
                     read = read,
                     status = cursor.getInt(statusIndex),
+                    box = type,
                 )
                 val existing = threads[threadId]
                 threads[threadId] = SmsThread(
@@ -366,6 +401,7 @@ object SmsRepository {
                 incoming = mms.incoming,
                 read = mms.read,
                 status = mms.messageBox,
+                box = mms.messageBox,
                 isMms = true,
                 mmsAttachment = mms.attachment,
             )
@@ -464,6 +500,7 @@ object SmsRepository {
                     incoming = type == Telephony.Sms.MESSAGE_TYPE_INBOX,
                     read = cursor.getInt(readIndex) != 0,
                     status = cursor.getInt(statusIndex),
+                    box = type,
                 )
             }
         }
@@ -484,6 +521,7 @@ object SmsRepository {
                 incoming = mms.incoming,
                 read = mms.read,
                 status = mms.messageBox,
+                box = mms.messageBox,
                 isMms = true,
                 mmsAttachment = mms.attachment,
             )
@@ -769,20 +807,94 @@ object SmsRepository {
             context.contentResolver.insert(Telephony.Sms.Outbox.CONTENT_URI, values),
         ) { "Could not persist outgoing SMS" }
 
+        transmitText(context, address, body, messageUri)
+        messageUri
+    }
+
+    fun retryFailedText(context: Context, messageId: Long): Result<Unit> = runCatching {
+        check(isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
+        require(messageId >= 0) { "Invalid SMS identifier" }
+        val messageUri = Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, messageId.toString())
+        val stored = checkNotNull(
+            context.contentResolver.query(
+                messageUri,
+                arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.TYPE),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (!cursor.moveToFirst()) null else Triple(
+                    cursor.getString(0).orEmpty(),
+                    cursor.getString(1).orEmpty(),
+                    cursor.getInt(2),
+                )
+            },
+        ) { "The failed SMS no longer exists" }
+        check(stored.third == Telephony.Sms.MESSAGE_TYPE_FAILED) { "Only a failed SMS can be retried" }
+        updateSmsProviderState(
+            context,
+            messageUri,
+            Telephony.Sms.MESSAGE_TYPE_OUTBOX,
+            Telephony.Sms.STATUS_PENDING,
+        )
+        clearFailure(context, messageUri)
+        transmitText(context, stored.first, stored.second, messageUri)
+    }
+
+    private fun transmitText(context: Context, address: String, body: String, messageUri: Uri) {
         val smsManager = smsManager(context)
         val parts = smsManager.divideMessage(body)
         val sentIntents = ArrayList<PendingIntent>(parts.size)
         val deliveredIntents = ArrayList<PendingIntent>(parts.size)
         parts.indices.forEach { partIndex ->
-            sentIntents += statusIntent(context, ACTION_SMS_SENT, messageUri, partIndex)
-            deliveredIntents += statusIntent(context, ACTION_SMS_DELIVERED, messageUri, partIndex)
+            sentIntents += statusIntent(context, ACTION_SMS_SENT, messageUri, partIndex, parts.size)
+            deliveredIntents += statusIntent(context, ACTION_SMS_DELIVERED, messageUri, partIndex, parts.size)
         }
-        if (parts.size == 1) {
-            smsManager.sendTextMessage(address, null, body, sentIntents[0], deliveredIntents[0])
+        try {
+            if (parts.size == 1) {
+                smsManager.sendTextMessage(address, null, body, sentIntents[0], deliveredIntents[0])
+            } else {
+                smsManager.sendMultipartTextMessage(address, null, parts, sentIntents, deliveredIntents)
+            }
+        } catch (error: Throwable) {
+            updateSmsProviderState(
+                context,
+                messageUri,
+                Telephony.Sms.MESSAGE_TYPE_FAILED,
+                Telephony.Sms.STATUS_FAILED,
+            )
+            throw error
+        }
+    }
+
+    fun failureDescription(context: Context, messageId: Long, isMms: Boolean): String? {
+        val uri = if (isMms) {
+            Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, (-messageId - 1).toString())
         } else {
-            smsManager.sendMultipartTextMessage(address, null, parts, sentIntents, deliveredIntents)
+            Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, messageId.toString())
         }
-        messageUri
+        val code = context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+            .getInt("failure:${uri}", Int.MIN_VALUE)
+        val httpStatus = context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+            .getInt("http:${uri}", 0)
+        if (isMms && httpStatus > 0) {
+            return "The carrier's MMS server returned HTTP $httpStatus. Check mobile data, APN/MMSC settings, and the selected SIM before retrying."
+        }
+        if (code == Int.MIN_VALUE) return if (isMms) {
+            "The carrier or Android MMS service rejected the send. Mobile data, APN settings, or the selected SIM may be unavailable."
+        } else {
+            "Android could not complete this SMS. Check mobile service and try again."
+        }
+        return when (code) {
+            SmsManager.RESULT_ERROR_RADIO_OFF -> "The mobile radio was turned off."
+            SmsManager.RESULT_ERROR_NO_SERVICE -> "No mobile service was available."
+            SmsManager.RESULT_ERROR_LIMIT_EXCEEDED -> "Android's SMS sending limit was exceeded."
+            SmsManager.RESULT_ERROR_FDN_CHECK_FAILURE -> "The SIM's fixed-dialing rules blocked this number."
+            SmsManager.RESULT_ERROR_NULL_PDU -> "Android could not create the carrier message."
+            SmsManager.RESULT_ERROR_GENERIC_FAILURE -> "The carrier rejected the message or returned an unknown error."
+            Activity.RESULT_CANCELED -> "The carrier send was cancelled before completion."
+            else -> "Android reported carrier error $code. Check mobile data, service, SIM, and APN settings."
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -799,11 +911,13 @@ object SmsRepository {
         action: String,
         messageUri: Uri,
         partIndex: Int,
+        partCount: Int,
     ): PendingIntent {
         val intent = Intent(context, SmsStatusReceiver::class.java).apply {
             this.action = action
             putExtra(EXTRA_MESSAGE_URI, messageUri.toString())
-            putExtra("part_index", partIndex)
+            putExtra(EXTRA_PART_INDEX, partIndex)
+            putExtra(EXTRA_PART_COUNT, partCount)
         }
         return PendingIntent.getBroadcast(
             context,
@@ -813,22 +927,114 @@ object SmsRepository {
         )
     }
 
-    fun updateSentState(context: Context, messageUri: Uri, resultCode: Int) {
+    fun updateSentPartState(
+        context: Context,
+        messageUri: Uri,
+        resultCode: Int,
+        partIndex: Int,
+        partCount: Int,
+    ) {
         if (!isDefaultSmsApp(context)) return
-        val values = ContentValues().apply {
-            put(
-                Telephony.Sms.TYPE,
-                if (resultCode == Activity.RESULT_OK) {
-                    Telephony.Sms.MESSAGE_TYPE_SENT
-                } else {
-                    Telephony.Sms.MESSAGE_TYPE_FAILED
-                },
+        if (resultCode != Activity.RESULT_OK) {
+            rememberFailure(context, messageUri, resultCode)
+            clearPartProgress(context, "sent", messageUri)
+            updateSmsProviderState(
+                context,
+                messageUri,
+                Telephony.Sms.MESSAGE_TYPE_FAILED,
+                Telephony.Sms.STATUS_FAILED,
             )
-            put(
-                Telephony.Sms.STATUS,
-                if (resultCode == Activity.RESULT_OK) Telephony.Sms.STATUS_NONE else Telephony.Sms.STATUS_FAILED,
+        } else if (recordSuccessfulPart(context, "sent", messageUri, partIndex, partCount)) {
+            updateSmsProviderState(
+                context,
+                messageUri,
+                Telephony.Sms.MESSAGE_TYPE_SENT,
+                Telephony.Sms.STATUS_NONE,
             )
         }
+    }
+
+    fun updateDeliveredPartState(
+        context: Context,
+        messageUri: Uri,
+        resultCode: Int,
+        partIndex: Int,
+        partCount: Int,
+    ) {
+        if (!isDefaultSmsApp(context) || resultCode != Activity.RESULT_OK) return
+        if (recordSuccessfulPart(context, "delivered", messageUri, partIndex, partCount)) {
+            updateSmsProviderState(
+                context,
+                messageUri,
+                Telephony.Sms.MESSAGE_TYPE_SENT,
+                Telephony.Sms.STATUS_COMPLETE,
+            )
+        }
+    }
+
+    private fun updateSmsProviderState(context: Context, messageUri: Uri, box: Int, status: Int) {
+        val values = ContentValues().apply {
+            put(Telephony.Sms.TYPE, box)
+            put(Telephony.Sms.STATUS, status)
+        }
         runCatching { context.contentResolver.update(messageUri, values, null, null) }
+        context.sendBroadcast(Intent(ACTION_SMS_CHANGED).setPackage(context.packageName))
+    }
+
+    @Synchronized
+    private fun recordSuccessfulPart(
+        context: Context,
+        stage: String,
+        messageUri: Uri,
+        partIndex: Int,
+        partCount: Int,
+    ): Boolean {
+        val expected = partCount.coerceAtLeast(1)
+        val key = "$stage:${messageUri}"
+        val preferences = context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+        val completed = preferences.getStringSet(key, emptySet()).orEmpty().toMutableSet()
+        completed += partIndex.coerceAtLeast(0).toString()
+        return if (completed.size >= expected) {
+            preferences.edit().remove(key).apply()
+            true
+        } else {
+            preferences.edit().putStringSet(key, completed).apply()
+            false
+        }
+    }
+
+    private fun clearPartProgress(context: Context, stage: String, messageUri: Uri) {
+        context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .remove("$stage:${messageUri}")
+            .apply()
+    }
+
+    private fun rememberFailure(context: Context, messageUri: Uri, resultCode: Int) {
+        context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .putInt("failure:${messageUri}", resultCode)
+            .apply()
+    }
+
+    fun rememberCarrierFailure(context: Context, rawUri: String, resultCode: Int, httpStatus: Int) {
+        val uri = runCatching { Uri.parse(rawUri) }.getOrNull() ?: return
+        rememberFailure(context, uri, resultCode)
+        if (httpStatus > 0) {
+            context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+                .edit()
+                .putInt("http:${uri}", httpStatus)
+                .apply()
+        }
+    }
+
+    fun clearCarrierFailure(context: Context, messageUri: Uri) = clearFailure(context, messageUri)
+
+    private fun clearFailure(context: Context, messageUri: Uri) {
+        context.getSharedPreferences(STATUS_PREFERENCES, Context.MODE_PRIVATE)
+            .edit()
+            .remove("failure:${messageUri}")
+            .remove("http:${messageUri}")
+            .apply()
     }
 }

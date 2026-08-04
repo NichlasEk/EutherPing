@@ -10,9 +10,23 @@ class SmsStatusReceiver : BroadcastReceiver() {
         val rawUri = intent.getStringExtra(SmsRepository.EXTRA_MESSAGE_URI) ?: return
         when (intent.action) {
             SmsRepository.ACTION_SMS_SENT -> {
-                SmsRepository.updateSentState(context, rawUri.toUri(), resultCode)
+                SmsRepository.updateSentPartState(
+                    context,
+                    rawUri.toUri(),
+                    resultCode,
+                    intent.getIntExtra(SmsRepository.EXTRA_PART_INDEX, 0),
+                    intent.getIntExtra(SmsRepository.EXTRA_PART_COUNT, 1),
+                )
             }
-            SmsRepository.ACTION_SMS_DELIVERED -> Unit
+            SmsRepository.ACTION_SMS_DELIVERED -> {
+                SmsRepository.updateDeliveredPartState(
+                    context,
+                    rawUri.toUri(),
+                    resultCode,
+                    intent.getIntExtra(SmsRepository.EXTRA_PART_INDEX, 0),
+                    intent.getIntExtra(SmsRepository.EXTRA_PART_COUNT, 1),
+                )
+            }
         }
     }
 }

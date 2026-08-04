@@ -152,6 +152,8 @@ import se.apothictech.eutherping.sms.CachedConversationIndex
 import se.apothictech.eutherping.sms.ConversationIndexCache
 import se.apothictech.eutherping.sms.SmsRepository
 import se.apothictech.eutherping.sms.SmsConversationIndexEntry
+import se.apothictech.eutherping.sms.MessageDeliveryState
+import se.apothictech.eutherping.sms.deliveryState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -174,7 +176,7 @@ private enum class AppTheme(val storedValue: String) {
     LIGHT("light"),
 }
 
-private const val PREFERENCES_NAME = "eutherping_preferences"
+internal const val PREFERENCES_NAME = "eutherping_preferences"
 private const val THEME_PREFERENCE = "app_theme"
 
 private fun loadAppTheme(context: android.content.Context): AppTheme {
@@ -224,6 +226,7 @@ private data class DemoMessage(
     val carrierMmsAttachment: CarrierMmsAttachment? = null,
     val wireBody: String = text,
     val isMms: Boolean = false,
+    val deliveryState: MessageDeliveryState? = null,
 )
 
 private sealed interface ImageActionTarget {
@@ -466,11 +469,24 @@ private fun EutherPingApp(
     var appTheme by rememberSaveable { mutableStateOf(loadAppTheme(context)) }
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
     var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
+    var biometricGateEnabled by remember { mutableStateOf(VesselBiometricGate.isEnabled(context)) }
+    var vesselsUnlocked by remember { mutableStateOf(false) }
+    var showVesselGate by remember { mutableStateOf(false) }
+    var pendingSecureConversation by remember { mutableStateOf<Conversation?>(null) }
+    var biometricAttempt by remember { mutableIntStateOf(0) }
+    var biometricError by remember { mutableStateOf<String?>(null) }
     var setupRevision by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
-    DisposableEffect(lifecycleOwner) {
+    DisposableEffect(lifecycleOwner, biometricGateEnabled) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) setupRevision++
+            if (event == Lifecycle.Event.ON_STOP && biometricGateEnabled) {
+                vesselsUnlocked = false
+                showVesselGate = false
+                pendingSecureConversation = null
+                if (selectedTab == SignalTab.CONTACTS) selectedTab = SignalTab.SIGNALS
+                if (activeConversation?.transport == Transport.SECURE) activeConversation = null
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -519,6 +535,18 @@ private fun EutherPingApp(
         }
     }
 
+    fun requestVesselAccess(conversation: Conversation? = null) {
+        if (!biometricGateEnabled || vesselsUnlocked) {
+            selectedTab = SignalTab.CONTACTS
+            if (conversation != null) activeConversation = conversation
+            return
+        }
+        pendingSecureConversation = conversation
+        biometricError = null
+        biometricAttempt++
+        showVesselGate = true
+    }
+
     LaunchedEffect(requestedAddress, requestedSecureLane) {
         val address = requestedAddress?.trim().orEmpty()
         if (address.isNotEmpty()) {
@@ -526,8 +554,7 @@ private fun EutherPingApp(
                 ContactRepository.displayName(context, address)
             }
             if (requestedSecureLane) {
-                selectedTab = SignalTab.CONTACTS
-                activeConversation = secureConversation(address, null, contactName)
+                requestVesselAccess(secureConversation(address, null, contactName))
             } else {
                 selectedTab = SignalTab.SIGNALS
                 activeConversation = cellConversation(address, null, contactName)
@@ -601,7 +628,9 @@ private fun EutherPingApp(
                         ) {
                             SignalDeck(
                                 selectedTab = selectedTab,
-                                onSelectedTabChange = { selectedTab = it },
+                                onSelectedTabChange = { tab ->
+                                    if (tab == SignalTab.CONTACTS) requestVesselAccess() else selectedTab = tab
+                                },
                                 isDefaultSmsApp = isDefaultSmsApp,
                                 hasSmsPermissions = hasSmsPermissions,
                                 smsRevision = smsRevision,
@@ -612,8 +641,20 @@ private fun EutherPingApp(
                                     appTheme = selectedTheme
                                     saveAppTheme(context, selectedTheme)
                                 },
+                                biometricGateEnabled = biometricGateEnabled,
+                                onBiometricGateEnabledChange = { enabled ->
+                                    biometricGateEnabled = enabled
+                                    VesselBiometricGate.setEnabled(context, enabled)
+                                    if (!enabled) vesselsUnlocked = true
+                                },
                                 onRequestSmsSetup = ::requestSmsSetup,
-                                onOpenConversation = { activeConversation = it },
+                                onOpenConversation = { conversation ->
+                                    if (conversation.transport == Transport.SECURE) {
+                                        requestVesselAccess(conversation)
+                                    } else {
+                                        activeConversation = conversation
+                                    }
+                                },
                             )
                         }
                         activeConversation?.let { conversation ->
@@ -621,6 +662,29 @@ private fun EutherPingApp(
                                 conversation = conversation,
                                 smsRevision = smsRevision,
                                 onBack = { activeConversation = null },
+                            )
+                        }
+                        if (showVesselGate) {
+                            VesselBiometricGateScreen(
+                                attempt = biometricAttempt,
+                                error = biometricError,
+                                onAuthenticationMessage = { biometricError = it },
+                                onAuthenticated = {
+                                    vesselsUnlocked = true
+                                    showVesselGate = false
+                                    selectedTab = SignalTab.CONTACTS
+                                    activeConversation = pendingSecureConversation
+                                    pendingSecureConversation = null
+                                },
+                                onRetry = {
+                                    biometricError = null
+                                    biometricAttempt++
+                                },
+                                onCancel = {
+                                    showVesselGate = false
+                                    pendingSecureConversation = null
+                                    selectedTab = SignalTab.SIGNALS
+                                },
                             )
                         }
                     }
@@ -706,8 +770,10 @@ private fun SignalDeck(
     smsRevision: Int,
     permissionRevision: Int,
     appTheme: AppTheme,
+    biometricGateEnabled: Boolean,
     interactionEnabled: Boolean,
     onThemeChange: (AppTheme) -> Unit,
+    onBiometricGateEnabledChange: (Boolean) -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
 ) {
@@ -877,6 +943,8 @@ private fun SignalDeck(
                         hasSmsPermissions = hasSmsPermissions,
                         appTheme = appTheme,
                         onThemeChange = onThemeChange,
+                        biometricGateEnabled = biometricGateEnabled,
+                        onBiometricGateEnabledChange = onBiometricGateEnabledChange,
                         onRequestSmsSetup = onRequestSmsSetup,
                     )
                 }
@@ -1468,6 +1536,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                 carrierMmsAttachment = message.mmsAttachment,
                                 wireBody = message.body,
                                 isMms = message.isMms,
+                                deliveryState = message.deliveryState(),
                             )
                         },
                     ).also {
@@ -1869,6 +1938,11 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     selectedMessage?.let { message ->
         MessageActionsDialog(
             message = message,
+            failureDescription = if (message.deliveryState == MessageDeliveryState.FAILED) {
+                SmsRepository.failureDescription(context, message.id, message.isMms)
+            } else {
+                null
+            },
             onDismiss = { selectedMessage = null },
             onCopy = {
                 clipboard.setText(AnnotatedString(message.text))
@@ -1882,6 +1956,28 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             onDelete = {
                 selectedMessage = null
                 deleteMessageCandidate = message
+            },
+            onRetry = if (message.outgoing && message.deliveryState == MessageDeliveryState.FAILED) {
+                {
+                    selectedMessage = null
+                    coroutineScope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            if (message.isMms) {
+                                CarrierMmsRepository.retryFailedMms(context, message.id).map { Unit }
+                            } else {
+                                SmsRepository.retryFailedText(context, message.id)
+                            }
+                        }
+                        result.onSuccess {
+                            attachmentRevision++
+                            Toast.makeText(context, "Message queued again", Toast.LENGTH_SHORT).show()
+                        }.onFailure { error ->
+                            Toast.makeText(context, "Retry failed: ${error.message}", Toast.LENGTH_LONG).show()
+                        }
+                    }
+                }
+            } else {
+                null
             },
         )
     }
@@ -2003,10 +2099,12 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
 @Composable
 private fun MessageActionsDialog(
     message: DemoMessage,
+    failureDescription: String?,
     onDismiss: () -> Unit,
     onCopy: () -> Unit,
     onForward: () -> Unit,
     onDelete: () -> Unit,
+    onRetry: (() -> Unit)?,
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -2019,6 +2117,19 @@ private fun MessageActionsDialog(
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.padding(bottom = 8.dp),
                 )
+                if (failureDescription != null) {
+                    Text(
+                        failureDescription,
+                        color = Amber,
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+                if (onRetry != null) {
+                    Button(onClick = onRetry, modifier = Modifier.fillMaxWidth()) {
+                        Text("Retry send")
+                    }
+                }
                 TextButton(onClick = onCopy, modifier = Modifier.fillMaxWidth()) {
                     Text("Copy text")
                 }
@@ -2406,6 +2517,15 @@ private fun MessageBubble(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 9.sp,
                 )
+                message.deliveryState?.let { state ->
+                    Text(
+                        "  // ${state.label}",
+                        color = if (state == MessageDeliveryState.FAILED) Amber else accent.copy(alpha = 0.82f),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 8.sp,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
         }
     }
@@ -2900,11 +3020,121 @@ private fun securePeerPreview(state: SecurePeerState): String = when (state) {
 }
 
 @Composable
+private fun VesselBiometricGateScreen(
+    attempt: Int,
+    error: String?,
+    onAuthenticationMessage: (String) -> Unit,
+    onAuthenticated: () -> Unit,
+    onRetry: () -> Unit,
+    onCancel: () -> Unit,
+) {
+    val context = LocalContext.current
+    DisposableEffect(context, attempt) {
+        val session = VesselBiometricGate.authenticate(
+            activity = context as MainActivity,
+            onSuccess = onAuthenticated,
+            onFailure = onAuthenticationMessage,
+        )
+        onDispose { session?.cancel() }
+    }
+    val transition = rememberInfiniteTransition(label = "vessel-biometric-scan")
+    val scan by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1_650, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "fingerprint-scan-position",
+    )
+    val toxicColor = Toxic
+    val violetColor = Violet
+    Surface(modifier = Modifier.fillMaxSize(), color = Color(0xF8020604)) {
+        Column(
+            modifier = Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 28.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
+            Text(
+                "VESSEL BIOMETRIC SEAL",
+                color = Violet,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Black,
+                fontSize = 18.sp,
+                letterSpacing = 1.6.sp,
+            )
+            Spacer(Modifier.height(28.dp))
+            Canvas(
+                modifier = Modifier
+                    .size(220.dp)
+                    .clip(CircleShape)
+                    .background(Color(0xFF07120D))
+                    .border(1.dp, Violet.copy(alpha = 0.65f), CircleShape),
+            ) {
+                val center = Offset(size.width / 2f, size.height / 2f)
+                drawCircle(violetColor.copy(alpha = 0.08f), radius = size.minDimension * 0.43f, center = center)
+                drawCircle(toxicColor.copy(alpha = 0.12f), radius = size.minDimension * 0.31f, center = center)
+                val widths = listOf(0.13f, 0.22f, 0.31f, 0.40f, 0.49f, 0.58f)
+                widths.forEachIndexed { index, fraction ->
+                    val diameter = size.minDimension * fraction
+                    drawArc(
+                        color = if (index % 2 == 0) toxicColor.copy(alpha = 0.9f) else violetColor.copy(alpha = 0.9f),
+                        startAngle = 205f + index * 5f,
+                        sweepAngle = 225f - index * 9f,
+                        useCenter = false,
+                        topLeft = Offset(center.x - diameter / 2f, center.y - diameter / 2f),
+                        size = androidx.compose.ui.geometry.Size(diameter, diameter * 1.22f),
+                        style = Stroke(width = 3.2f),
+                    )
+                }
+                val scanY = size.height * (0.18f + scan * 0.64f)
+                drawLine(
+                    brush = Brush.horizontalGradient(
+                        listOf(Color.Transparent, violetColor, toxicColor, violetColor, Color.Transparent),
+                    ),
+                    start = Offset(size.width * 0.12f, scanY),
+                    end = Offset(size.width * 0.88f, scanY),
+                    strokeWidth = 4f,
+                )
+            }
+            Spacer(Modifier.height(22.dp))
+            Text(
+                if (error == null) "SCANNING ENROLLED BIOMETRIC…" else "SEAL REMAINS LOCKED",
+                color = if (error == null) Toxic else Amber,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                fontSize = 12.sp,
+            )
+            Text(
+                error ?: "Android verifies your fingerprint. EutherPing never receives biometric data.",
+                color = Muted,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 10.dp),
+            )
+            Spacer(Modifier.height(20.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                TextButton(onClick = onCancel) { Text("BACK TO SIGNALS") }
+                if (error != null) {
+                    Button(
+                        onClick = onRetry,
+                        colors = ButtonDefaults.buttonColors(containerColor = Violet),
+                    ) {
+                        Text("SCAN AGAIN", color = Color.White)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun SystemScreen(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
     appTheme: AppTheme,
     onThemeChange: (AppTheme) -> Unit,
+    biometricGateEnabled: Boolean,
+    onBiometricGateEnabledChange: (Boolean) -> Unit,
     onRequestSmsSetup: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -2934,6 +3164,31 @@ private fun SystemScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         ThemePickerCard(appTheme = appTheme, onThemeChange = onThemeChange)
+        val biometricAvailability = remember(bluetoothRevision) {
+            VesselBiometricGate.availability(context)
+        }
+        SystemCard(
+            "VESSEL BIOMETRIC SEAL",
+            when {
+                !biometricGateEnabled -> "DISABLED"
+                biometricAvailability == VesselBiometricAvailability.READY -> "ARMED"
+                biometricAvailability == VesselBiometricAvailability.NOT_ENROLLED -> "ENROLL FINGERPRINT"
+                else -> "UNAVAILABLE"
+            },
+            if (biometricGateEnabled && biometricAvailability == VesselBiometricAvailability.READY) Violet else Amber,
+            when (biometricAvailability) {
+                VesselBiometricAvailability.READY ->
+                    "Require Android biometric authentication whenever Vessels is opened after EutherPing leaves the foreground."
+                VesselBiometricAvailability.NOT_ENROLLED ->
+                    "The seal is enabled, but Android has no enrolled biometric. Enroll a fingerprint in Android Settings first."
+                VesselBiometricAvailability.NO_HARDWARE ->
+                    "This phone has no Android biometric sensor supported by EutherPing."
+                VesselBiometricAvailability.UNAVAILABLE ->
+                    "Android's biometric service is temporarily unavailable."
+            },
+            actionLabel = if (biometricGateEnabled) "DISABLE SEAL" else "ENABLE SEAL",
+            onAction = { onBiometricGateEnabledChange(!biometricGateEnabled) },
+        )
         SystemCard(
             "SMS ARRAY",
             when {
