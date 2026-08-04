@@ -18,6 +18,10 @@ import android.telephony.PhoneNumberUtils
 import android.telephony.SmsManager
 import androidx.core.content.ContextCompat
 import se.apothictech.eutherping.secure.SecureRepository
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 data class SmsThread(
     val threadId: Long,
@@ -546,6 +550,7 @@ object SmsRepository {
         context: Context,
         query: String,
         secureLane: Boolean,
+        matchingAddresses: Set<String> = emptySet(),
         limit: Int = 50,
     ): Result<List<SmsSearchHit>> = runCatching {
         check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
@@ -564,7 +569,10 @@ object SmsRepository {
             arguments = arrayOf("%$needle%") + SecureRepository.secureBodyPrefixes.map { "$it%" }
             queryLimit = limit
         }
-        val hits = mutableListOf<SmsSearchHit>()
+        val hits = linkedMapOf<String, SmsSearchHit>()
+        fun addHit(hit: SmsSearchHit, key: String = "sms:${hit.messageId}") {
+            if (hits.size < limit) hits.putIfAbsent(key, hit)
+        }
         queryNewest(
             context,
             Telephony.Sms.CONTENT_URI,
@@ -591,17 +599,126 @@ object SmsRepository {
                     body
                 }
                 if (!display.contains(needle, ignoreCase = true)) continue
-                hits += SmsSearchHit(
+                addHit(SmsSearchHit(
                     messageId = cursor.getLong(0),
                     threadId = cursor.getLong(1),
                     address = address,
                     text = display,
                     timestamp = cursor.getLong(4),
                     incoming = incoming,
+                ))
+            }
+        }
+        val normalizedNeedle = PhoneNumberUtils.normalizeNumber(needle)
+        val normalizedAddresses = matchingAddresses.mapTo(hashSetOf(), PhoneNumberUtils::normalizeNumber)
+        if (hits.size < limit && (!secureLane || normalizedAddresses.isNotEmpty() || normalizedNeedle.isNotBlank())) {
+            queryNewest(
+                context,
+                Telephony.Sms.CONTENT_URI,
+                arrayOf(
+                    Telephony.Sms._ID,
+                    Telephony.Sms.THREAD_ID,
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.DATE,
+                    Telephony.Sms.TYPE,
+                ),
+                "1 = 1",
+                emptyArray(),
+                Telephony.Sms.DATE,
+                maxOf(limit * 6, 240),
+            )?.use { cursor ->
+                while (cursor.moveToNext() && hits.size < limit) {
+                    val address = cursor.getString(2).orEmpty()
+                    val body = cursor.getString(3).orEmpty()
+                    val incoming = cursor.getInt(5) == Telephony.Sms.MESSAGE_TYPE_INBOX
+                    val display = if (secureLane) {
+                        if (!SecureRepository.isSecureBody(body)) continue
+                        SecureRepository.decodeForDisplay(context, address, body, incoming)?.text ?: continue
+                    } else {
+                        if (SecureRepository.isSecureBody(body)) continue
+                        body
+                    }
+                    val timestamp = cursor.getLong(4)
+                    if (!searchMetadataMatches(
+                            address,
+                            timestamp,
+                            needle,
+                            normalizedNeedle,
+                            normalizedAddresses,
+                        ) && !display.contains(needle, ignoreCase = true)
+                    ) continue
+                    addHit(
+                        SmsSearchHit(
+                            messageId = cursor.getLong(0),
+                            threadId = cursor.getLong(1),
+                            address = address,
+                            text = display,
+                            timestamp = timestamp,
+                            incoming = incoming,
+                        ),
+                    )
+                }
+            }
+        }
+        if (!secureLane && hits.size < limit) {
+            loadMmsEntries(
+                context = context,
+                threadId = null,
+                address = null,
+                limit = maxOf(limit * 4, 160),
+            ).forEach { mms ->
+                if (hits.size >= limit) return@forEach
+                val thread = mms.threadId ?: return@forEach
+                if (!mms.body.contains(needle, ignoreCase = true) &&
+                    !searchMetadataMatches(
+                        mms.address,
+                        mms.timestamp,
+                        needle,
+                        normalizedNeedle,
+                        normalizedAddresses,
+                    )
+                ) return@forEach
+                addHit(
+                    SmsSearchHit(
+                        messageId = -mms.id - 1,
+                        threadId = thread,
+                        address = mms.address,
+                        text = mms.body.ifBlank {
+                            if (mms.attachment != null) "📷 Carrier MMS" else "Carrier MMS"
+                        },
+                        timestamp = mms.timestamp,
+                        incoming = mms.incoming,
+                    ),
+                    key = "mms:${mms.id}",
                 )
             }
         }
-        hits
+        hits.values.sortedByDescending(SmsSearchHit::timestamp).take(limit)
+    }
+
+    private fun searchMetadataMatches(
+        address: String,
+        timestamp: Long,
+        needle: String,
+        normalizedNeedle: String,
+        matchingAddresses: Set<String>,
+    ): Boolean {
+        val normalizedAddress = PhoneNumberUtils.normalizeNumber(address)
+        val addressMatches = normalizedNeedle.isNotBlank() && normalizedAddress.contains(normalizedNeedle)
+        val contactMatches = matchingAddresses.any { candidate ->
+            candidate == normalizedAddress ||
+                (candidate.length >= 7 && normalizedAddress.length >= 7 &&
+                    candidate.takeLast(7) == normalizedAddress.takeLast(7))
+        }
+        val date = Instant.ofEpochMilli(timestamp).atZone(ZoneId.systemDefault())
+        val dateMatches = listOf(
+            DateTimeFormatter.ISO_LOCAL_DATE,
+            DateTimeFormatter.ofPattern("d/M/yyyy", Locale.getDefault()),
+            DateTimeFormatter.ofPattern("d MMM yyyy", Locale.getDefault()),
+            DateTimeFormatter.ofPattern("MMM d", Locale.getDefault()),
+        ).any { formatter -> formatter.format(date).contains(needle, ignoreCase = true) }
+        return addressMatches || contactMatches || dateMatches
     }
 
     private fun secureBodyPrefixesClause(): String =
@@ -675,13 +792,13 @@ object SmsRepository {
             )
             val selection = threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" }
             val arguments = threadId?.let { arrayOf(it.toString()) }
-            val cursor = if (limit != null && selection != null && arguments != null) {
+            val cursor = if (limit != null) {
                 queryNewest(
                     context = context,
                     uri = Telephony.Mms.CONTENT_URI,
                     projection = projection,
-                    selection = selection,
-                    arguments = arguments,
+                    selection = selection ?: "1 = 1",
+                    arguments = arguments ?: emptyArray(),
                     sortColumn = Telephony.Mms.DATE,
                     limit = limit,
                 )
@@ -808,6 +925,61 @@ object SmsRepository {
                 arrayOf(threadId.toString()),
             )
             true
+        }.getOrDefault(false)
+    }
+
+    fun markThreadUnread(context: Context, threadId: Long?, secureLane: Boolean): Boolean {
+        if (threadId == null || !isDefaultSmsApp(context)) return false
+        data class Candidate(val uri: Uri, val timestamp: Long)
+
+        var smsCandidate: Candidate? = null
+        queryNewest(
+            context = context,
+            uri = Telephony.Sms.CONTENT_URI,
+            projection = arrayOf(Telephony.Sms._ID, Telephony.Sms.BODY, Telephony.Sms.DATE),
+            selection = "${Telephony.Sms.THREAD_ID} = ? AND ${Telephony.Sms.TYPE} = ?",
+            arguments = arrayOf(threadId.toString(), Telephony.Sms.MESSAGE_TYPE_INBOX.toString()),
+            sortColumn = Telephony.Sms.DATE,
+            limit = 120,
+        )?.use { cursor ->
+            while (cursor.moveToNext()) {
+                val body = cursor.getString(1).orEmpty()
+                if (SecureRepository.isSecureBody(body) != secureLane) continue
+                smsCandidate = Candidate(
+                    Uri.withAppendedPath(Telephony.Sms.CONTENT_URI, cursor.getLong(0).toString()),
+                    cursor.getLong(2),
+                )
+                break
+            }
+        }
+
+        var mmsCandidate: Candidate? = null
+        if (!secureLane) {
+            queryNewest(
+                context = context,
+                uri = Telephony.Mms.CONTENT_URI,
+                projection = arrayOf(Telephony.Mms._ID, Telephony.Mms.DATE),
+                selection = "${Telephony.Mms.THREAD_ID} = ? AND ${Telephony.Mms.MESSAGE_BOX} = ?",
+                arguments = arrayOf(threadId.toString(), Telephony.Mms.MESSAGE_BOX_INBOX.toString()),
+                sortColumn = Telephony.Mms.DATE,
+                limit = 1,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    mmsCandidate = Candidate(
+                        Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, cursor.getLong(0).toString()),
+                        cursor.getLong(1) * 1000L,
+                    )
+                }
+            }
+        }
+        val candidate = listOfNotNull(smsCandidate, mmsCandidate).maxByOrNull(Candidate::timestamp)
+            ?: return false
+        val values = ContentValues().apply {
+            put(Telephony.Sms.READ, 0)
+            put(Telephony.Sms.SEEN, 0)
+        }
+        return runCatching {
+            context.contentResolver.update(candidate.uri, values, null, null) > 0
         }.getOrDefault(false)
     }
 

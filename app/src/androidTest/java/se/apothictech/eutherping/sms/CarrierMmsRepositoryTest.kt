@@ -12,6 +12,8 @@ import androidx.core.content.ContextCompat
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import se.apothictech.eutherping.ConversationControlsRepository
+import se.apothictech.eutherping.NotificationPrivacy
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
@@ -100,8 +102,30 @@ class CarrierMmsRepositoryTest {
     }
 
     @Test
+    fun marksOnlyLatestCarrierMessageUnreadAgain() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("cmd role add-role-holder android.app.role.SMS ${context.packageName}")
+            .close()
+        Thread.sleep(500)
+        val uri = requireNotNull(
+            SmsRepository.persistIncoming(context, "15551230009", "Unread round trip", System.currentTimeMillis()),
+        )
+        val threadId = requireNotNull(SmsRepository.threadIdForMessage(context, uri))
+        assertTrue(SmsRepository.markThreadRead(context, threadId))
+        assertTrue(SmsRepository.markThreadUnread(context, threadId, secureLane = false))
+        context.contentResolver.query(uri, arrayOf("read", "seen"), null, null, null)?.use { cursor ->
+            assertTrue(cursor.moveToFirst())
+            assertEquals(0, cursor.getInt(0))
+            assertEquals(0, cursor.getInt(1))
+        }
+        context.contentResolver.delete(uri, null, null)
+    }
+
+    @Test
     fun postsCarrierMmsNotification() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        ConversationControlsRepository.setNotificationPrivacy(context, NotificationPrivacy.SENDER_AND_PREVIEW)
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.cancelAll()
 
@@ -112,7 +136,9 @@ class CarrierMmsRepositoryTest {
             secureLane = false,
             displayName = "Ada Lovelace",
         )
-
+        assertTrue("Carrier MMS notification was not posted", repeatUntil(2_000L) {
+            manager.activeNotifications.any { it.id == "+46701234567".hashCode() }
+        })
         val notification = manager.activeNotifications
             .firstOrNull { it.id == "+46701234567".hashCode() }
             ?.notification
@@ -135,6 +161,35 @@ class CarrierMmsRepositoryTest {
     }
 
     @Test
+    fun notificationPrivacyCanHidePreviewOrSender() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val address = "+46701112233"
+
+        ConversationControlsRepository.setNotificationPrivacy(context, NotificationPrivacy.SENDER_ONLY)
+        IncomingMessageNotifier.show(context, address, "secret ordinary body", false, displayName = "Ada")
+        var notification = manager.activeNotifications.first { it.id == address.hashCode() }.notification
+        assertEquals("Ada", notification.extras.getCharSequence(Notification.EXTRA_TITLE))
+        assertEquals("New message", notification.extras.getCharSequence(Notification.EXTRA_TEXT))
+
+        ConversationControlsRepository.setNotificationPrivacy(context, NotificationPrivacy.PRIVATE)
+        IncomingMessageNotifier.show(context, address, "secret ordinary body", false, displayName = "Ada")
+        assertTrue("Private notification did not replace the previous preview", repeatUntil(2_000L) {
+            manager.activeNotifications
+                .firstOrNull { it.id == address.hashCode() }
+                ?.notification
+                ?.extras
+                ?.getCharSequence(Notification.EXTRA_TITLE) == "New message"
+        })
+        notification = manager.activeNotifications.first { it.id == address.hashCode() }.notification
+        assertEquals("New message", notification.extras.getCharSequence(Notification.EXTRA_TITLE))
+        assertEquals("Open EutherPing to read", notification.extras.getCharSequence(Notification.EXTRA_TEXT))
+
+        manager.cancel(address.hashCode())
+        ConversationControlsRepository.setNotificationPrivacy(context, NotificationPrivacy.SENDER_AND_PREVIEW)
+    }
+
+    @Test
     fun secureNotificationNeverAcceptsLockScreenPlaintextReply() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -148,7 +203,9 @@ class CarrierMmsRepositoryTest {
             secureLane = true,
             displayName = "Verified Vessel",
         )
-
+        assertTrue("Secure notification was not posted", repeatUntil(2_000L) {
+            manager.activeNotifications.any { it.id == address.hashCode() }
+        })
         val notification = manager.activeNotifications
             .firstOrNull { it.id == address.hashCode() }
             ?.notification
@@ -229,6 +286,12 @@ class CarrierMmsRepositoryTest {
             assertTrue(it.moveToFirst())
             assertNotNull(it.getString(0))
         }
+        assertTrue(
+            "Bounded global search did not find the carrier MMS caption",
+            SmsRepository.searchMessages(context, "carrier MMS instrumentation", secureLane = false)
+                .getOrThrow()
+                .any { it.messageId < 0 && it.text.contains("instrumentation") },
+        )
         val snapshot = SmsRepository.loadConversationSnapshot(context).getOrThrow()
         val mmsConversation = snapshot.firstOrNull { conversation ->
             conversation.messages.any(SmsEntry::isMms)
@@ -288,6 +351,44 @@ class CarrierMmsRepositoryTest {
         ).firstOrNull { it.isMms && it.body == longText }
         assertNotNull("Conversation history did not expose the automatic text MMS", textMms)
         assertTrue("Text-only MMS unexpectedly exposed an image", textMms?.mmsAttachment == null)
+    }
+
+    @Test
+    fun boundedSearchMatchesBodyNumberContactAndDate() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("cmd role add-role-holder android.app.role.SMS ${context.packageName}")
+            .close()
+        Thread.sleep(500)
+        val address = "+46705550123"
+        val uri = requireNotNull(
+            SmsRepository.persistIncoming(context, address, "Searchable narwhal phrase", System.currentTimeMillis()),
+        )
+        try {
+            assertTrue(
+                SmsRepository.searchMessages(context, "narwhal", false).getOrThrow()
+                    .any { it.address == address },
+            )
+            assertTrue(
+                SmsRepository.searchMessages(context, "5550123", false).getOrThrow()
+                    .any { it.address == address },
+            )
+            assertTrue(
+                SmsRepository.searchMessages(
+                    context,
+                    "Ada Search Contact",
+                    false,
+                    matchingAddresses = setOf(address),
+                ).getOrThrow().any { it.address == address },
+            )
+            val today = java.time.LocalDate.now().toString()
+            assertTrue(
+                SmsRepository.searchMessages(context, today, false).getOrThrow()
+                    .any { it.address == address },
+            )
+        } finally {
+            context.contentResolver.delete(uri, null, null)
+        }
     }
 
     @Test

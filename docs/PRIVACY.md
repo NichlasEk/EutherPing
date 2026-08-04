@@ -42,6 +42,12 @@ queries and decrypted results are not cached. Ordinary notification quick reply
 passes the typed reply directly to Android's carrier SMS/MMS path; Secure
 notifications do not accept plaintext RemoteInput replies.
 
+Pin and archive state is app-private metadata. Blocking and unblocking use
+Android's system blocked-number provider after explicit confirmation, so the
+choice can also affect calls and other carrier-message apps. Notification
+privacy can hide the message preview, or both sender and preview; Secure Vessel
+notifications always use the private form.
+
 ## Security and limitations
 
 Secure Ping is labelled beta. It uses established cryptographic primitives, but it does not yet provide Double Ratchet forward secrecy, post-compromise security, secure backups, or group encryption. Users should compare the safety code on both devices in person or through another trusted channel before verifying a Vessel.

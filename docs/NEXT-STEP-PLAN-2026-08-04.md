@@ -122,3 +122,9 @@ as complete.
   per-conversation text/image drafts (Keystore-encrypted for Vessels), bounded
   on-device message-text search, and active-conversation search. Secure
   notifications intentionally do not accept lock-screen plaintext replies.
+- `0.8.2`: phase 3 complete — global search also matches bounded MMS captions,
+  contacts, numbers, and local date formats; long-press conversation controls
+  pin, archive, mark read/unread, and confirm Android system block/unblock.
+  Archived rows are explicitly recoverable, and System offers sender+preview,
+  sender-only, and private notification modes. Existing per-message copy,
+  forward, and local-delete actions remain available inside conversations.

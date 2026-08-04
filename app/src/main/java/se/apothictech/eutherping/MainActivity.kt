@@ -204,6 +204,13 @@ private enum class SignalTab(val label: String) {
     SYSTEM("SYSTEM"),
 }
 
+private enum class ConversationControlAction {
+    TOGGLE_PIN,
+    TOGGLE_ARCHIVE,
+    TOGGLE_READ,
+    TOGGLE_BLOCK,
+}
+
 private data class Conversation(
     val id: Int,
     val name: String,
@@ -216,6 +223,9 @@ private data class Conversation(
     val smsAddress: String? = null,
     val threadId: Long? = null,
     val hasDraft: Boolean = false,
+    val pinned: Boolean = false,
+    val archived: Boolean = false,
+    val blocked: Boolean = false,
 )
 
 private data class DemoMessage(
@@ -474,6 +484,7 @@ private fun EutherPingApp(
     onAddressConsumed: () -> Unit,
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var appTheme by rememberSaveable { mutableStateOf(loadAppTheme(context)) }
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
     var draftRevision by remember { mutableIntStateOf(0) }
@@ -793,9 +804,11 @@ private fun SignalDeck(
     onOpenConversation: (Conversation) -> Unit,
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var showContactSearch by rememberSaveable { mutableStateOf(false) }
     var showMessageSearch by rememberSaveable { mutableStateOf(false) }
     var messageSearchQuery by rememberSaveable { mutableStateOf("") }
+    var blockCandidate by remember { mutableStateOf<Conversation?>(null) }
     var contactPermissionRevision by remember { mutableIntStateOf(0) }
     val contactsPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -825,7 +838,20 @@ private fun SignalDeck(
     }
     val phoneContacts = contactsState.contacts
     var historyRetry by remember { mutableIntStateOf(0) }
+    var controlsRevision by remember { mutableIntStateOf(0) }
+    var showArchived by rememberSaveable { mutableStateOf(false) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
+    val blockedNumbers by produceState(
+        initialValue = emptySet<String>(),
+        realSmsReady,
+        controlsRevision,
+    ) {
+        value = if (realSmsReady) {
+            withContext(Dispatchers.IO) { ConversationControlsRepository.blockedNumbers(context) }
+        } else {
+            emptySet()
+        }
+    }
     val initialHistory = remember(realSmsReady) {
         if (realSmsReady) {
             ConversationIndexCache.load(context)?.live() ?: DeckHistory(loading = true)
@@ -871,27 +897,23 @@ private fun SignalDeck(
             refreshed
         }
     }
-    val history = remember(unlabelledHistory, phoneContacts, draftRevision) {
+    val history = remember(unlabelledHistory, phoneContacts, draftRevision, controlsRevision, blockedNumbers) {
         applyContactNames(unlabelledHistory, phoneContacts).let { named ->
+            fun decorate(conversation: Conversation, secure: Boolean): Conversation {
+                val address = conversation.smsAddress.orEmpty()
+                val controls = ConversationControlsRepository.state(context, address, secure)
+                return conversation.copy(
+                    hasDraft = DraftRepository.hasDraft(context, address, secure),
+                    pinned = controls.pinned,
+                    archived = controls.archived,
+                    blocked = ConversationControlsRepository.isBlocked(blockedNumbers, address),
+                )
+            }
             named.copy(
-                signals = named.signals.map { conversation ->
-                    conversation.copy(
-                        hasDraft = DraftRepository.hasDraft(
-                            context,
-                            conversation.smsAddress.orEmpty(),
-                            secure = false,
-                        ),
-                    )
-                },
-                vessels = named.vessels.map { conversation ->
-                    conversation.copy(
-                        hasDraft = DraftRepository.hasDraft(
-                            context,
-                            conversation.smsAddress.orEmpty(),
-                            secure = true,
-                        ),
-                    )
-                },
+                signals = named.signals.map { decorate(it, false) }
+                    .sortedByDescending(Conversation::pinned),
+                vessels = named.vessels.map { decorate(it, true) }
+                    .sortedByDescending(Conversation::pinned),
             )
         }
     }
@@ -901,6 +923,40 @@ private fun SignalDeck(
             showContactSearch = true
         } else {
             contactsPermissionLauncher.launch(Manifest.permission.READ_CONTACTS)
+        }
+    }
+
+    fun applyConversationControl(conversation: Conversation, action: ConversationControlAction) {
+        val address = conversation.smsAddress ?: return
+        val secure = conversation.transport == Transport.SECURE
+        when (action) {
+            ConversationControlAction.TOGGLE_PIN -> {
+                ConversationControlsRepository.setPinned(context, address, secure, !conversation.pinned)
+                controlsRevision++
+            }
+            ConversationControlAction.TOGGLE_ARCHIVE -> {
+                ConversationControlsRepository.setArchived(context, address, secure, !conversation.archived)
+                controlsRevision++
+            }
+            ConversationControlAction.TOGGLE_READ -> coroutineScope.launch {
+                val changed = withContext(Dispatchers.IO) {
+                    if (conversation.unread > 0) {
+                        SmsRepository.markThreadRead(context, conversation.threadId)
+                    } else {
+                        SmsRepository.markThreadUnread(
+                            context,
+                            conversation.threadId,
+                            secureLane = secure,
+                        )
+                    }
+                }
+                if (changed) historyRetry++ else Toast.makeText(
+                    context,
+                    "Android could not change the read state",
+                    Toast.LENGTH_SHORT,
+                ).show()
+            }
+            ConversationControlAction.TOGGLE_BLOCK -> blockCandidate = conversation
         }
     }
 
@@ -949,6 +1005,13 @@ private fun SignalDeck(
                                 context,
                                 query,
                                 secureLane = selectedTab == SignalTab.CONTACTS,
+                                matchingAddresses = phoneContacts.asSequence()
+                                    .filter { contact ->
+                                        contact.name.contains(query, ignoreCase = true) ||
+                                            contact.phoneNumber.contains(query, ignoreCase = true)
+                                    }
+                                    .map(PhoneContact::phoneNumber)
+                                    .toSet(),
                             ).fold(
                                 onSuccess = { MessageSearchState(hits = it) },
                                 onFailure = { MessageSearchState(error = it.message ?: it.javaClass.simpleName) },
@@ -960,6 +1023,7 @@ private fun SignalDeck(
                     query = messageSearchQuery,
                     onQueryChange = { messageSearchQuery = it },
                     secure = selectedTab == SignalTab.CONTACTS,
+                    contacts = phoneContacts,
                     state = searchState,
                     onBack = {
                         showMessageSearch = false
@@ -1004,6 +1068,8 @@ private fun SignalDeck(
                         messageSearchQuery = ""
                         showMessageSearch = true
                     },
+                    showArchived = showArchived,
+                    onToggleArchived = { showArchived = !showArchived },
                     searchDescription = if (selectedTab == SignalTab.CONTACTS) {
                         "Find a vessel"
                     } else {
@@ -1020,6 +1086,8 @@ private fun SignalDeck(
                         onRetryHistory = { historyRetry++ },
                         onRequestSmsSetup = onRequestSmsSetup,
                         onOpenConversation = onOpenConversation,
+                        showArchived = showArchived,
+                        onConversationAction = ::applyConversationControl,
                     )
                     SignalTab.CONTACTS -> VesselsScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
@@ -1030,6 +1098,8 @@ private fun SignalDeck(
                         onRetryHistory = { historyRetry++ },
                         onRequestSmsSetup = onRequestSmsSetup,
                         onOpenConversation = onOpenConversation,
+                        showArchived = showArchived,
+                        onConversationAction = ::applyConversationControl,
                     )
                     SignalTab.SYSTEM -> SystemScreen(
                         isDefaultSmsApp = isDefaultSmsApp,
@@ -1044,6 +1114,54 @@ private fun SignalDeck(
             }
         }
     }
+    blockCandidate?.let { conversation ->
+        AlertDialog(
+            onDismissRequest = { blockCandidate = null },
+            containerColor = Deep,
+            title = {
+                Text(
+                    if (conversation.blocked) "UNBLOCK NUMBER?" else "BLOCK NUMBER?",
+                    color = Amber,
+                    fontFamily = FontFamily.Monospace,
+                )
+            },
+            text = {
+                Text(
+                    if (conversation.blocked) {
+                        "Android will allow calls and carrier messages from ${conversation.name} again."
+                    } else {
+                        "Android will block calls and carrier messages from ${conversation.name}. Existing history is kept."
+                    },
+                    color = Mist,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    blockCandidate = null
+                    coroutineScope.launch {
+                        ConversationControlsRepository.setBlocked(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            !conversation.blocked,
+                        ).onSuccess {
+                            controlsRevision++
+                        }.onFailure { error ->
+                            Toast.makeText(
+                                context,
+                                "Could not update block list: ${error.message}",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                        }
+                    }
+                }) {
+                    Text(if (conversation.blocked) "UNBLOCK" else "BLOCK", color = Amber)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { blockCandidate = null }) { Text("CANCEL", color = Muted) }
+            },
+        )
+    }
 }
 
 @Composable
@@ -1052,6 +1170,8 @@ private fun DeckHeader(
     onRefresh: () -> Unit,
     onOpenSystem: () -> Unit,
     onSearchMessages: () -> Unit,
+    showArchived: Boolean,
+    onToggleArchived: () -> Unit,
     searchDescription: String,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1105,6 +1225,15 @@ private fun DeckHeader(
                     },
                 )
             }
+            if (onSearch != null) {
+                DropdownMenuItem(
+                    text = { Text(if (showArchived) "Hide archived" else "Show archived") },
+                    onClick = {
+                        menuExpanded = false
+                        onToggleArchived()
+                    },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Refresh messages") },
                 onClick = {
@@ -1133,11 +1262,13 @@ private fun SignalsScreen(
     onRetryHistory: () -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
+    showArchived: Boolean,
+    onConversationAction: (Conversation, ConversationControlAction) -> Unit,
 ) {
     var showNewSignal by rememberSaveable { mutableStateOf(false) }
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
     val displayedConversations = if (realSmsReady) {
-        conversations
+        conversations.filter { showArchived || !it.archived }
     } else {
         sampleConversations().filter { it.transport == Transport.SMS }
     }
@@ -1201,7 +1332,11 @@ private fun SignalsScreen(
             }
         }
         items(displayedConversations, key = { it.id }) { conversation ->
-            ConversationRow(conversation, onClick = { onOpenConversation(conversation) })
+            ConversationRow(
+                conversation,
+                onClick = { onOpenConversation(conversation) },
+                onAction = { onConversationAction(conversation, it) },
+            )
         }
     }
     if (showNewSignal) {
@@ -1440,14 +1575,23 @@ private fun SonarHero(
 }
 
 @Composable
-private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
+private fun ConversationRow(
+    conversation: Conversation,
+    onClick: () -> Unit,
+    onAction: (ConversationControlAction) -> Unit,
+) {
     val accent = if (conversation.transport == Transport.SECURE) Violet else Amber
-    Card(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick),
-        shape = RoundedCornerShape(17.dp),
-        colors = CardDefaults.cardColors(containerColor = Panel),
-        border = BorderStroke(1.dp, accent.copy(alpha = 0.18f)),
-    ) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    Box(modifier = Modifier.fillMaxWidth()) {
+        Card(
+            modifier = Modifier.fillMaxWidth().combinedClickable(
+                onClick = onClick,
+                onLongClick = { menuExpanded = true },
+            ),
+            shape = RoundedCornerShape(17.dp),
+            colors = CardDefaults.cardColors(containerColor = Panel),
+            border = BorderStroke(1.dp, accent.copy(alpha = 0.18f)),
+        ) {
         Row(
             modifier = Modifier.fillMaxWidth().padding(13.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1502,6 +1646,15 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     StatusChip(conversation.transport.label, accent)
+                    if (conversation.pinned) {
+                        Text("  //  PINNED", color = Toxic, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                    }
+                    if (conversation.archived) {
+                        Text("  //  ARCHIVED", color = Violet, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                    }
+                    if (conversation.blocked) {
+                        Text("  //  BLOCKED", color = Amber, fontFamily = FontFamily.Monospace, fontSize = 9.sp)
+                    }
                     Text(
                         "  //  ${conversation.distance}",
                         color = Muted.copy(alpha = 0.75f),
@@ -1509,6 +1662,25 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
                         fontSize = 9.sp,
                     )
                 }
+            }
+        }
+        }
+        DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            listOf(
+                (if (conversation.pinned) "Unpin" else "Pin") to ConversationControlAction.TOGGLE_PIN,
+                (if (conversation.archived) "Unarchive" else "Archive") to ConversationControlAction.TOGGLE_ARCHIVE,
+                (if (conversation.unread > 0) "Mark as read" else "Mark as unread") to
+                    ConversationControlAction.TOGGLE_READ,
+                (if (conversation.blocked) "Unblock number" else "Block number") to
+                    ConversationControlAction.TOGGLE_BLOCK,
+            ).forEach { (label, action) ->
+                DropdownMenuItem(
+                    text = { Text(label) },
+                    onClick = {
+                        menuExpanded = false
+                        onAction(action)
+                    },
+                )
             }
         }
     }
@@ -2738,6 +2910,7 @@ private fun MessageSearchScreen(
     query: String,
     onQueryChange: (String) -> Unit,
     secure: Boolean,
+    contacts: List<PhoneContact>,
     state: MessageSearchState,
     onBack: () -> Unit,
     onOpen: (SmsSearchHit) -> Unit,
@@ -2758,7 +2931,7 @@ private fun MessageSearchScreen(
         OutlinedTextField(
             value = query,
             onValueChange = onQueryChange,
-            label = { Text("Message text") },
+            label = { Text("Text, contact, number or date") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
         )
@@ -2791,7 +2964,7 @@ private fun MessageSearchScreen(
                     Column(modifier = Modifier.fillMaxWidth().padding(13.dp)) {
                         Row {
                             Text(
-                                hit.address,
+                                ContactRepository.displayName(contacts, hit.address) ?: hit.address,
                                 color = accent,
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
@@ -3190,8 +3363,11 @@ private fun VesselsScreen(
     onRetryHistory: () -> Unit,
     onRequestSmsSetup: () -> Unit,
     onOpenConversation: (Conversation) -> Unit,
+    showArchived: Boolean,
+    onConversationAction: (Conversation, ConversationControlAction) -> Unit,
 ) {
     val realSmsReady = isDefaultSmsApp && hasSmsPermissions
+    val displayedVessels = if (realSmsReady) vessels.filter { showArchived || !it.archived } else vessels
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -3233,7 +3409,7 @@ private fun VesselsScreen(
                 modifier = Modifier.padding(bottom = 5.dp),
             )
         }
-        if (realSmsReady && !historyLoading && historyError == null && vessels.isEmpty()) {
+        if (realSmsReady && !historyLoading && historyError == null && displayedVessels.isEmpty()) {
             item {
                 Card(
                     colors = CardDefaults.cardColors(containerColor = Violet.copy(alpha = 0.08f)),
@@ -3251,7 +3427,13 @@ private fun VesselsScreen(
                 }
             }
         }
-        items(vessels, key = { it.id }) { ConversationRow(it) { onOpenConversation(it) } }
+        items(displayedVessels, key = { it.id }) { conversation ->
+            ConversationRow(
+                conversation,
+                onClick = { onOpenConversation(conversation) },
+                onAction = { onConversationAction(conversation, it) },
+            )
+        }
     }
 }
 
@@ -3390,6 +3572,9 @@ private fun SystemScreen(
     onRequestSmsSetup: () -> Unit,
 ) {
     val context = LocalContext.current
+    var notificationPrivacy by remember {
+        mutableStateOf(ConversationControlsRepository.notificationPrivacy(context))
+    }
     val secureIdentity = remember { SecureRepository.ensureIdentity(context) }
     var bluetoothRevision by remember { mutableIntStateOf(0) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -3416,6 +3601,13 @@ private fun SystemScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         ThemePickerCard(appTheme = appTheme, onThemeChange = onThemeChange)
+        NotificationPrivacyCard(
+            privacy = notificationPrivacy,
+            onPrivacyChange = { selected ->
+                notificationPrivacy = selected
+                ConversationControlsRepository.setNotificationPrivacy(context, selected)
+            },
+        )
         val biometricAvailability = remember(bluetoothRevision) {
             VesselBiometricGate.availability(context)
         }
@@ -3498,6 +3690,51 @@ private fun SystemScreen(
                 "Secure private keys and outgoing plaintext copies are encrypted under Android Keystore."
             },
         )
+    }
+}
+
+@Composable
+private fun NotificationPrivacyCard(
+    privacy: NotificationPrivacy,
+    onPrivacyChange: (NotificationPrivacy) -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Panel),
+        border = BorderStroke(1.dp, Violet.copy(alpha = 0.28f)),
+        shape = RoundedCornerShape(16.dp),
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(
+                "NOTIFICATION PRIVACY",
+                color = Mist,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+            )
+            Text(
+                "Controls ordinary SMS/MMS previews. Secure Vessels always hide sender and plaintext.",
+                color = Muted,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 7.dp, bottom = 12.dp),
+            )
+            NotificationPrivacy.entries.forEach { option ->
+                val label = when (option) {
+                    NotificationPrivacy.SENDER_AND_PREVIEW -> "SENDER + PREVIEW"
+                    NotificationPrivacy.SENDER_ONLY -> "SENDER ONLY"
+                    NotificationPrivacy.PRIVATE -> "PRIVATE"
+                }
+                Button(
+                    onClick = { onPrivacyChange(option) },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (privacy == option) Violet else Panel,
+                        contentColor = if (privacy == option) Color.White else Mist,
+                    ),
+                    border = BorderStroke(1.dp, Violet.copy(alpha = 0.55f)),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
+                ) {
+                    Text(label, fontFamily = FontFamily.Monospace, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
     }
 }
 

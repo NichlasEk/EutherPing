@@ -1,5 +1,12 @@
 # EutherPing
 
+Version 0.8.2 completes the daily-convenience phase. Long-press a conversation
+to pin, archive, mark read/unread, or confirm Android system block/unblock;
+archived rows can always be shown again from the deck menu. Search now covers
+bounded SMS and MMS text, contact names, phone numbers, and dates. System offers
+sender-and-preview, sender-only, and fully private ordinary notification modes,
+while Secure Vessels remain private regardless of that choice.
+
 Version 0.8.1 adds ordinary notification quick reply, persistent conversation
 drafts, and bounded on-device message search. Vessel draft text is encrypted
 under the Android Keystore vault, and Secure notifications intentionally do not

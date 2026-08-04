@@ -14,6 +14,8 @@ import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import se.apothictech.eutherping.MainActivity
+import se.apothictech.eutherping.ConversationControlsRepository
+import se.apothictech.eutherping.NotificationPrivacy
 import se.apothictech.eutherping.R
 import se.apothictech.eutherping.contacts.ContactRepository
 
@@ -33,6 +35,22 @@ object IncomingMessageNotifier {
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) return
+        val blocked = runCatching {
+            ConversationControlsRepository.canBlockNumbers(context) &&
+                android.provider.BlockedNumberContract.isBlocked(context, address)
+        }.getOrDefault(false)
+        if (blocked) return
+        val privacy = ConversationControlsRepository.notificationPrivacy(context)
+        val visibleTitle = when {
+            secureLane || privacy == NotificationPrivacy.PRIVATE -> "New message"
+            else -> displayName ?: address
+        }
+        val visibleBody = when {
+            secureLane -> "Encrypted Secure Ping"
+            privacy == NotificationPrivacy.SENDER_ONLY -> "New message"
+            privacy == NotificationPrivacy.PRIVATE -> "Open EutherPing to read"
+            else -> body
+        }
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(
@@ -107,14 +125,20 @@ object IncomingMessageNotifier {
         }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_eutherping)
-            .setContentTitle(displayName ?: address)
-            .setContentText(body)
-            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentTitle(visibleTitle)
+            .setContentText(visibleBody)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(visibleBody))
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setVisibility(
+                if (secureLane || privacy == NotificationPrivacy.PRIVATE) {
+                    NotificationCompat.VISIBILITY_SECRET
+                } else {
+                    NotificationCompat.VISIBILITY_PRIVATE
+                },
+            )
             .apply {
                 replyAction?.let(::addAction)
                 markReadAction?.let(::addAction)
