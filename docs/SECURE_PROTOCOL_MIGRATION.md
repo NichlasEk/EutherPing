@@ -3,6 +3,11 @@
 Status: design checkpoint for independent review. No new protocol dependency is
 enabled by this document. EutherPing remains **Secure Beta**.
 
+The legacy identity-control boundary, including the signed fresh version 3
+pairing capsule and its fail-closed replacement policy, is documented in
+[`SECURE_PAIRING_CONTROL.md`](SECURE_PAIRING_CONTROL.md). It hardens migration
+entry but is not a substitute for the reviewed session protocol below.
+
 ## Decision
 
 The leading implementation for one-to-one Secure Vessels is Signal's current

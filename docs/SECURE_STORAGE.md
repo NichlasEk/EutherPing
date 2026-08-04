@@ -1,6 +1,6 @@
 # Secure Vessels storage boundary
 
-This document describes EutherPing 0.8.7. It is a storage boundary, not a claim
+This document describes EutherPing 0.8.8. It is a storage boundary, not a claim
 that the current Secure Beta framing is a reviewed ratcheting protocol.
 
 ## What is stored where
@@ -42,7 +42,7 @@ destination selected by the user, then deletes it in `finally`.
 
 Cloud backup and device-to-device transfer are disabled for the entire app.
 
-Authenticated message and attachment frames are admitted once. A private replay
+Authenticated message, attachment, and current pairing frames are admitted once. A private replay
 index hashes the peer fingerprint, frame kind, and random frame ID, then stores
 only that derived key, the ciphertext SHA-256, and local acceptance time. It is
 bounded to 4,096 records with 90-day retention. Exact network replays, conflicting
@@ -50,6 +50,13 @@ ciphertext under an accepted ID, signed frames older than 30 days, and frames
 more than 24 hours ahead of the local clock are rejected before Telephony
 persistence. This is an anti-replay layer for the current beta framing, not a
 substitute for the planned reviewed ratcheting protocol.
+
+New pairing controls self-sign their timestamp, random 128-bit control ID, and
+complete compact public-key bundle with the included Ed25519 identity. The same
+30-day past and 24-hour future bounds apply before any peer state or Telephony
+row is written. Legacy v2/v1 controls remain readable and exact duplicates are
+suppressed, but their old formats contain no authenticated creation time and
+therefore cannot receive retrospective stale-age enforcement.
 
 An incoming pairing control with a different identity cannot replace a verified
 peer. The trusted public keys remain in their original fields, the candidate

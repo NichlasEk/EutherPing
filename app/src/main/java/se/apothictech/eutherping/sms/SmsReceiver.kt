@@ -18,7 +18,17 @@ class SmsReceiver : BroadcastReceiver() {
             ?: "Unknown sender"
         val body = parts.joinToString(separator = "") { it.displayMessageBody.orEmpty() }
         val timestamp = parts.minOfOrNull { it.timestampMillis } ?: System.currentTimeMillis()
-        SecureRepository.handleIncomingControl(context, address, body)
+        when (SecureRepository.acceptIncomingControl(context, address, body)) {
+            SecureFrameAcceptance.DUPLICATE,
+            SecureFrameAcceptance.STALE,
+            SecureFrameAcceptance.INVALID,
+            -> {
+                Log.w("EutherPingSecure", "Rejected duplicate, stale, or invalid Secure pairing control")
+                return
+            }
+            SecureFrameAcceptance.ACCEPTED -> Unit
+            SecureFrameAcceptance.NOT_AUTHENTICATED_FRAME -> Unit
+        }
         when (SecureRepository.acceptIncomingAuthenticatedFrame(context, address, body)) {
             SecureFrameAcceptance.DUPLICATE,
             SecureFrameAcceptance.STALE,

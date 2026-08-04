@@ -172,3 +172,11 @@ as complete.
   flow. Duplicate and third replacement controls are idempotent and cannot
   rotate either saved identity. Timestamped pairing-control framing and the
   reviewed ratcheting-protocol migration remain unfinished.
+- `0.8.8`: new pairing invitations and acceptances self-sign their complete
+  public-key bundle, timestamp, and random 128-bit control ID. They are admitted
+  once through the bounded replay index and rejected when tampered, duplicated,
+  older than 30 days, or over 24 hours in the future before peer state or
+  Telephony persistence. The signed control is bounded to two SMS parts. Legacy
+  v2/v1 controls remain readable with exact-duplicate suppression but cannot
+  retroactively prove freshness. The reviewed ratcheting-protocol migration
+  remains unfinished.

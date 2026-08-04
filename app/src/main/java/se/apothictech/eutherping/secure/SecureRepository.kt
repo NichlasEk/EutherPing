@@ -30,6 +30,7 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
+import java.security.SecureRandom
 import java.util.UUID
 
 enum class SecurePeerState {
@@ -122,6 +123,9 @@ object SecureRepository {
     private const val MASTER_KEY_URI = "android-keystore://eutherping_secure_master_v1"
     private const val CONTEXT_LABEL = "EutherPing Secure Beta v1|"
     private const val BASE64_FLAGS = Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING
+    private const val CONTROL_ID_BYTES = 16
+    private const val MAX_COMPACT_CONTROL_BASE64_CHARS = 301
+    private val COMPACT_CONTROL_BASE64 = Regex("[A-Za-z0-9_-]+")
 
     @Volatile
     private var cryptoRegistered = false
@@ -187,7 +191,7 @@ object SecureRepository {
         require(normalized.isNotBlank()) { "A destination number is required" }
         val current = peer(context, normalized)
         check(!current.hasKeys) { "A Secure identity already exists for this contact" }
-        val wire = encodeBundle(INVITE_PREFIX, identity(context))
+        val wire = encodeBundle(context, INVITE_PREFIX, identity(context))
         savePeer(
             context,
             SecurePeer(normalized, null, null, null, SecurePeerState.INVITE_SENT),
@@ -202,7 +206,7 @@ object SecureRepository {
             "The invitation has no usable keys"
         }
         savePeer(context, current.copy(state = SecurePeerState.ACTIVE_UNVERIFIED))
-        encodeBundle(ACCEPT_PREFIX, identity(context))
+        encodeBundle(context, ACCEPT_PREFIX, identity(context))
     }
 
     fun markVerified(context: Context, address: String) {
@@ -221,7 +225,7 @@ object SecureRepository {
         val signing = checkNotNull(current.pendingSigningPublicKey)
         val fingerprint = checkNotNull(current.pendingFingerprint)
         val response = if (current.pendingRequiresAcceptance) {
-            encodeBundle(ACCEPT_PREFIX, identity(context))
+            encodeBundle(context, ACCEPT_PREFIX, identity(context))
         } else {
             null
         }
@@ -254,16 +258,39 @@ object SecureRepository {
         }
     }
 
-    fun handleIncomingControl(context: Context, address: String, body: String): Boolean {
+    fun acceptIncomingControl(
+        context: Context,
+        address: String,
+        body: String,
+        now: Long = System.currentTimeMillis(),
+    ): SecureFrameAcceptance {
         val (prefix, isAcceptance) = when {
             body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX to false
             body.startsWith(ACCEPT_PREFIX) -> ACCEPT_PREFIX to true
             body.startsWith(LEGACY_INVITE_PREFIX) -> LEGACY_INVITE_PREFIX to false
             body.startsWith(LEGACY_ACCEPT_PREFIX) -> LEGACY_ACCEPT_PREFIX to true
-            else -> return false
+            else -> return SecureFrameAcceptance.NOT_AUTHENTICATED_FRAME
         }
         val bundle = runCatching { decodeBundle(body, prefix) }.getOrNull()
-            ?: return false
+            ?: return SecureFrameAcceptance.INVALID
+        val bodyHash = sha256(body.toByteArray(UTF_8)).toHex()
+        val isFreshSignedControl = bundle.controlId != null && bundle.timestamp != null
+        val acceptance = SecureReplayRepository.accept(
+            context,
+            AuthenticatedSecureFrame(
+                kind = when {
+                    !isFreshSignedControl -> "pairing-legacy"
+                    isAcceptance -> "pairing-accept"
+                    else -> "pairing-invite"
+                },
+                id = bundle.controlId ?: bodyHash,
+                timestamp = bundle.timestamp ?: now,
+                senderFingerprint = bundle.fingerprint,
+                ciphertextSha256 = bodyHash,
+            ),
+            now,
+        )
+        if (acceptance != SecureFrameAcceptance.ACCEPTED) return acceptance
         val current = peer(context, address)
         val resolved = resolveIncomingIdentity(
             current = current,
@@ -273,7 +300,7 @@ object SecureRepository {
             isAcceptance = isAcceptance,
         )
         savePeer(context, resolved)
-        return true
+        return SecureFrameAcceptance.ACCEPTED
     }
 
     internal fun resolveIncomingIdentity(
@@ -709,6 +736,8 @@ object SecureRepository {
         val encryptionPublicKey: ByteArray,
         val signingPublicKey: ByteArray,
         val fingerprint: String,
+        val timestamp: Long? = null,
+        val controlId: String? = null,
     )
 
     private fun identity(context: Context): IdentityBundle {
@@ -723,21 +752,38 @@ object SecureRepository {
         )
     }
 
-    private fun encodeBundle(prefix: String, bundle: IdentityBundle): String {
+    private fun encodeBundle(
+        context: Context,
+        prefix: String,
+        bundle: IdentityBundle,
+        timestamp: Long = System.currentTimeMillis(),
+        controlId: ByteArray = ByteArray(CONTROL_ID_BYTES).also(SecureRandom()::nextBytes),
+    ): String {
         require(prefix == INVITE_PREFIX || prefix == ACCEPT_PREFIX)
+        require(controlId.size == CONTROL_ID_BYTES)
         val encryption = compactPublicKey(bundle.encryptionPublicKey, HPKE_PUBLIC_TYPE_URL)
         val signing = compactPublicKey(bundle.signingPublicKey, ED25519_PUBLIC_TYPE_URL)
-        val wire = ByteBuffer.allocate(
-            1 + Int.SIZE_BYTES + Short.SIZE_BYTES + encryption.value.size +
+        val unsigned = ByteBuffer.allocate(
+            1 + Long.SIZE_BYTES + CONTROL_ID_BYTES +
+                Int.SIZE_BYTES + Short.SIZE_BYTES + encryption.value.size +
                 Int.SIZE_BYTES + Short.SIZE_BYTES + signing.value.size,
         ).order(ByteOrder.BIG_ENDIAN)
-            .put(2)
+            .put(3)
+            .putLong(timestamp)
+            .put(controlId)
             .putInt(encryption.keyId)
             .putShort(encryption.value.size.toShort())
             .put(encryption.value)
             .putInt(signing.keyId)
             .putShort(signing.value.size.toShort())
             .put(signing.value)
+            .array()
+        val signature = signingKeyset(context).getPrimitive(PublicKeySign::class.java).sign(unsigned)
+        val wire = ByteBuffer.allocate(unsigned.size + Short.SIZE_BYTES + signature.size)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put(unsigned)
+            .putShort(signature.size.toShort())
+            .put(signature)
             .array()
         return prefix + encode(wire)
     }
@@ -750,16 +796,46 @@ object SecureRepository {
 
     private fun decodeCompactBundle(encoded: String): IdentityBundle {
         registerCrypto()
-        val buffer = ByteBuffer.wrap(decode(encoded)).order(ByteOrder.BIG_ENDIAN)
-        require(buffer.get().toInt() == 2) { "Unsupported compact key bundle" }
+        require(encoded.length in 1..MAX_COMPACT_CONTROL_BASE64_CHARS) {
+            "Compact pairing control exceeds its two-SMS bound"
+        }
+        require(COMPACT_CONTROL_BASE64.matches(encoded)) { "Invalid compact pairing encoding" }
+        val wire = decode(encoded)
+        val buffer = ByteBuffer.wrap(wire).order(ByteOrder.BIG_ENDIAN)
+        val version = buffer.get().toInt()
+        require(version == 2 || version == 3) { "Unsupported compact key bundle" }
+        val timestamp = if (version == 3) buffer.long else null
+        val controlIdBytes = if (version == 3) {
+            ByteArray(CONTROL_ID_BYTES).also(buffer::get)
+        } else {
+            null
+        }
         val encryption = readCompactPublicKey(buffer, HPKE_PUBLIC_TYPE_URL)
         val signing = readCompactPublicKey(buffer, ED25519_PUBLIC_TYPE_URL)
+        if (version == 3) {
+            val signedSize = buffer.position()
+            require(buffer.remaining() >= Short.SIZE_BYTES) { "Missing pairing signature" }
+            val signatureSize = buffer.short.toInt() and 0xffff
+            require(signatureSize in 1..128 && buffer.remaining() == signatureSize) {
+                "Invalid pairing signature length"
+            }
+            val signature = ByteArray(signatureSize).also(buffer::get)
+            KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(signing))
+                .getPrimitive(PublicKeyVerify::class.java)
+                .verify(signature, wire.copyOfRange(0, signedSize))
+        }
         require(!buffer.hasRemaining()) { "Unexpected compact key data" }
         KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(encryption))
             .getPrimitive(HybridEncrypt::class.java)
         KeysetHandle.readNoSecret(BinaryKeysetReader.withBytes(signing))
             .getPrimitive(PublicKeyVerify::class.java)
-        return IdentityBundle(encryption, signing, fingerprint(encryption, signing))
+        return IdentityBundle(
+            encryption,
+            signing,
+            fingerprint(encryption, signing),
+            timestamp,
+            controlIdBytes?.toHex(),
+        )
     }
 
     private fun decodeAndVerifyLegacyBundle(encoded: String): IdentityBundle {
@@ -978,6 +1054,8 @@ object SecureRepository {
     private fun normalizeAddress(address: String): String = address.trim().filter { it.isDigit() || it == '+' }
 
     private fun sha256(bytes: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(bytes)
+
+    private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
     private fun encode(bytes: ByteArray): String = Base64.encodeToString(bytes, BASE64_FLAGS)
 
