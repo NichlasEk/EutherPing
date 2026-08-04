@@ -18,6 +18,7 @@ import androidx.core.content.ContextCompat
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.Inet4Address
@@ -47,6 +48,7 @@ object SecureAttachmentRepository {
     private const val SERVER_PREFS = "eutherping_attachment_server_v1"
     private const val DOWNLOAD_PREFS = "eutherping_attachment_downloads_v1"
     private const val BUFFER_SIZE = 64 * 1024
+    private const val MAX_IN_MEMORY_IMAGE_BYTES = 32 * 1024 * 1024L
     private const val OFFER_LIFETIME_MS = 24 * 60 * 60 * 1000L
     private val random = SecureRandom()
     private val serverRunning = AtomicBoolean(false)
@@ -54,6 +56,7 @@ object SecureAttachmentRepository {
     fun clearTransientPlaintext(context: Context) {
         File(context.cacheDir, "secure_attachment_view").listFiles()?.forEach(File::delete)
         File(context.cacheDir, "secure_attachment_preview").listFiles()?.forEach(File::delete)
+        File(context.cacheDir, "secure_attachment_save").listFiles()?.forEach(File::delete)
     }
 
     fun ensureServerStarted(context: Context): Result<Unit> = runCatching {
@@ -232,7 +235,6 @@ object SecureAttachmentRepository {
             check(sha256(partial) == descriptor.ciphertextSha256) {
                 "Encrypted attachment hash mismatch"
             }
-            verifyPlaintext(descriptor, partial)
             if (encrypted.exists()) encrypted.delete()
             check(partial.renameTo(encrypted)) { "Could not store encrypted attachment" }
             context.getSharedPreferences(DOWNLOAD_PREFS, Context.MODE_PRIVATE)
@@ -258,29 +260,33 @@ object SecureAttachmentRepository {
     internal fun isDisplayableImage(mimeType: String): Boolean =
         mimeType.startsWith("image/", ignoreCase = true)
 
+    fun canPreviewInMemory(descriptor: SecureAttachmentDescriptor): Boolean =
+        isDisplayableImage(descriptor.mimeType) &&
+            descriptor.plaintextSize in 0..MAX_IN_MEMORY_IMAGE_BYTES
+
     fun loadImagePreview(context: Context, descriptor: SecureAttachmentDescriptor): Result<Bitmap> = runCatching {
         require(isDisplayableImage(descriptor.mimeType)) { "Attachment is not an image" }
         val encrypted = storedCiphertext(context, descriptor)
         checkNotNull(encrypted) { "Download the image first" }
-        val previewDirectory = File(context.cacheDir, "secure_attachment_preview").apply { mkdirs() }
-        val plaintext = File(previewDirectory, "${descriptor.id}-${System.nanoTime()}.preview")
+        val plaintext = decryptVerifiedBytes(descriptor, encrypted, MAX_IN_MEMORY_IMAGE_BYTES)
         try {
-            decryptToFile(descriptor, encrypted, plaintext)
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-            BitmapFactory.decodeFile(plaintext.absolutePath, bounds)
+            BitmapFactory.decodeByteArray(plaintext, 0, plaintext.size, bounds)
             check(bounds.outWidth > 0 && bounds.outHeight > 0) { "Attachment is not a supported image" }
             var sampleSize = 1
             while (bounds.outWidth / sampleSize > 1_600 || bounds.outHeight / sampleSize > 1_600) {
                 sampleSize *= 2
             }
             checkNotNull(
-                BitmapFactory.decodeFile(
-                    plaintext.absolutePath,
+                BitmapFactory.decodeByteArray(
+                    plaintext,
+                    0,
+                    plaintext.size,
                     BitmapFactory.Options().apply { inSampleSize = sampleSize },
                 ),
             ) { "Could not decode the verified image" }
         } finally {
-            plaintext.delete()
+            plaintext.fill(0)
         }
     }
 
@@ -327,15 +333,6 @@ object SecureAttachmentRepository {
             }
         } finally {
             plaintext.delete()
-        }
-    }
-
-    private fun verifyPlaintext(descriptor: SecureAttachmentDescriptor, encrypted: File) {
-        val verification = File(encrypted.parentFile, "${descriptor.id}.verify")
-        try {
-            decryptToFile(descriptor, encrypted, verification)
-        } finally {
-            verification.delete()
         }
     }
 
@@ -439,6 +436,49 @@ object SecureAttachmentRepository {
             plaintext.delete()
             throw error
         }
+    }
+
+    internal fun decryptVerifiedBytes(
+        descriptor: SecureAttachmentDescriptor,
+        encrypted: File,
+        maximumBytes: Long,
+    ): ByteArray {
+        require(descriptor.plaintextSize <= maximumBytes) {
+            "Image is too large for an in-app preview; use Open verified file instead"
+        }
+        val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+            init(
+                Cipher.DECRYPT_MODE,
+                SecretKeySpec(descriptor.contentKey, "AES"),
+                GCMParameterSpec(128, descriptor.nonce),
+            )
+            updateAAD(descriptor.id.toByteArray(Charsets.UTF_8))
+        }
+        val digest = MessageDigest.getInstance("SHA-256")
+        val output = ByteArrayOutputStream(descriptor.plaintextSize.toInt())
+        var size = 0L
+        CipherInputStream(BufferedInputStream(encrypted.inputStream(), BUFFER_SIZE), cipher).use { input ->
+            val buffer = ByteArray(BUFFER_SIZE)
+            try {
+                while (true) {
+                    val count = input.read(buffer)
+                    if (count < 0) break
+                    size += count
+                    require(size <= descriptor.plaintextSize && size <= maximumBytes) {
+                        "Decrypted image exceeded its signed size"
+                    }
+                    digest.update(buffer, 0, count)
+                    output.write(buffer, 0, count)
+                }
+            } finally {
+                buffer.fill(0)
+            }
+        }
+        check(size == descriptor.plaintextSize) { "Decrypted attachment size mismatch" }
+        check(digest.digest().toHex() == descriptor.plaintextSha256) {
+            "Decrypted attachment hash mismatch"
+        }
+        return output.toByteArray()
     }
 
     private fun serveLoop(context: Context, server: ServerSocket) {

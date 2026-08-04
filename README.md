@@ -1,5 +1,14 @@
 # EutherPing
 
+Version 0.8.5 hardens Secure Vessels storage. Encrypted attachment payloads stay
+in a dedicated private app directory and are no longer decrypted merely because
+a conversation is opened. A verified image is downloaded as ciphertext and is
+decrypted only after `DECRYPT // SHOW IMAGE` is pressed; its authenticated image
+bytes exist in memory only for the bounded preview and are cleared after decode.
+Explicitly opening any attachment still creates a private, temporary FileProvider
+copy so Android can hand it to the chosen viewer. Crash leftovers are removed at
+the next app start. See [`docs/SECURE_STORAGE.md`](docs/SECURE_STORAGE.md).
+
 Version 0.8.4 adds explicit SIM chips on multi-subscription phones, remembers a
 choice per one-to-one or group conversation, and refuses to silently switch
 away from a remembered SIM that is no longer active. Each carrier bubble and
@@ -35,7 +44,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.4`; the detailed `0.8.0` overview below describes
+The current release is `0.8.5`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
@@ -62,7 +71,7 @@ This is deliberately labelled **Secure Beta**. It does not yet implement a Doubl
 
 Version 0.7.0 keeps each invitation and acceptance to one carrier SMS and matches equivalent local/international number formats such as `070…` and `+4670…`. Encrypted messages and attachment offers can span several SMS, so carrier charges may apply. Secure mode never silently falls back to plaintext SMS or MMS. GrapheneOS can grant Network for direct Wi-Fi and Nearby devices for Bluetooth attachment transfer.
 
-In a verified Vessel, the attachment button encrypts a selected file locally with AES-256-GCM, signs and HPKE-encrypts its key and manifest for the recipient, and sends that offer as Secure Ping SMS capsules. The same encrypted payload transfers over direct Wi-Fi first or authenticated Bluetooth Classic between phones already paired in Android settings. Bluetooth never carries ordinary SMS or decrypted text. The sender must keep EutherPing available, offers expire after 24 hours, and this beta limits files to 256 MB. The receiving phone verifies the Vessel identity, request proof, ciphertext hash, AEAD tag, plaintext size, and plaintext hash. Verified images are fetched and shown inline only in their separate Vessel conversation; other files retain an explicit open action.
+In a verified Vessel, the attachment button encrypts a selected file locally with AES-256-GCM, signs and HPKE-encrypts its key and manifest for the recipient, and sends that offer as Secure Ping SMS capsules. The same encrypted payload transfers over direct Wi-Fi first or authenticated Bluetooth Classic between phones already paired in Android settings. Bluetooth never carries ordinary SMS or decrypted text. The sender must keep EutherPing available, offers expire after 24 hours, and this beta limits files to 256 MB. The receiving phone verifies the Vessel identity, request proof and ciphertext hash while downloading; AEAD authentication, plaintext size, and plaintext hash are verified only when the user asks to decrypt. Verified images are shown inline only after that explicit action and only in their separate Vessel conversation; other files retain an explicit open action.
 
 In an ordinary Signal conversation, the same attachment button selects an image, scales and JPEG-compresses it to the active carrier's reported MMS limit, builds a standard MMS PDU, persists it in Android's Telephony provider, and delegates upload to Android's subscription-aware `SmsManager`. Incoming WAP Push notifications are downloaded through the same system API and persisted as carrier MMS. This path needs physical testing across the intended phones, SIMs, APNs, roaming policies, and carriers; emulator tests can prove PDU/provider integration but cannot prove a mobile operator accepts the transfer.
 
@@ -76,7 +85,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Privacy
 
-EutherPing 0.8.0 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext is stored in a Keystore-protected local vault so the sender can read their own history. Attachment payloads remain encrypted in private app storage. Inline Vessel image decoding uses a short-lived plaintext cache file that is deleted immediately after the bounded preview is created; explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
+EutherPing 0.8.5 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext is stored in a Keystore-protected local vault so the sender can read their own history. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
 
 ## Visual direction
 

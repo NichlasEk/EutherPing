@@ -1788,7 +1788,6 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var secureRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     var attachmentRevision by remember(conversation.smsAddress) { mutableIntStateOf(0) }
     var attachmentBusy by remember(conversation.smsAddress) { mutableStateOf(false) }
-    val automaticImageAttempts = remember(conversation.id) { mutableSetOf<String>() }
     var selectedMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var selectedImageAction by remember(conversation.id) { mutableStateOf<ImageActionTarget?>(null) }
     var pendingImageSave by remember(conversation.id) { mutableStateOf<ImageActionTarget?>(null) }
@@ -2361,8 +2360,6 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         message = message,
                         attachmentRevision = attachmentRevision + smsRevision,
                         secureAddress = conversation.smsAddress.takeIf { secureLane },
-                        automaticImagesAllowed = securePeer?.state == SecurePeerState.VERIFIED,
-                        automaticImageAttempts = automaticImageAttempts,
                         onLongPress = { selectedMessage = message },
                         onSecureImageLongPress = { selectedImageAction = ImageActionTarget.Secure(it) },
                         onCarrierImageLongPress = { selectedImageAction = ImageActionTarget.Carrier(it) },
@@ -2814,8 +2811,6 @@ private fun MessageBubble(
     message: DemoMessage,
     attachmentRevision: Int,
     secureAddress: String?,
-    automaticImagesAllowed: Boolean,
-    automaticImageAttempts: MutableSet<String>,
     onLongPress: () -> Unit,
     onSecureImageLongPress: (SecureAttachmentDescriptor) -> Unit,
     onCarrierImageLongPress: (CarrierMmsAttachment) -> Unit,
@@ -2863,39 +2858,44 @@ private fun MessageBubble(
         ) {
             LinkifiedMessageText(message.text)
             message.attachment?.let { attachment ->
+                val previewableSecureImage = remember(attachment.id, attachment.plaintextSize) {
+                    SecureAttachmentRepository.canPreviewInMemory(attachment)
+                }
                 val downloaded = remember(attachment.id, attachmentRevision) {
                     SecureAttachmentRepository.downloadedCiphertext(context, attachment.id) != null
                 }
+                var secureImagePreviewRequested by remember(attachment.id) { mutableStateOf(false) }
+                var secureImagePreviewError by remember(attachment.id) { mutableStateOf<String?>(null) }
                 val secureImagePreview by produceState<Bitmap?>(
                     initialValue = null,
                     attachment.id,
                     attachmentRevision,
                     secureAddress,
-                    automaticImagesAllowed,
+                    secureImagePreviewRequested,
                 ) {
-                    if (secureAddress != null && automaticImagesAllowed &&
-                        SecureAttachmentRepository.isDisplayableImage(attachment.mimeType)
+                    if (secureAddress != null && secureImagePreviewRequested &&
+                        previewableSecureImage
                     ) {
                         val stored = !attachment.incoming ||
                             SecureAttachmentRepository.downloadedCiphertext(context, attachment.id) != null
-                        if (stored || automaticImageAttempts.add(attachment.id)) {
-                            val result = withContext(Dispatchers.IO) {
-                                runCatching {
-                                    if (attachment.incoming && !stored) {
-                                        SecureAttachmentRepository.downloadIncoming(
-                                            context,
-                                            secureAddress,
-                                            attachment,
-                                        ).getOrThrow()
-                                    }
-                                    SecureAttachmentRepository.loadImagePreview(context, attachment).getOrThrow()
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                if (attachment.incoming && !stored) {
+                                    SecureAttachmentRepository.downloadIncoming(
+                                        context,
+                                        secureAddress,
+                                        attachment,
+                                    ).getOrThrow()
                                 }
+                                SecureAttachmentRepository.loadImagePreview(context, attachment).getOrThrow()
                             }
-                            result.onSuccess { value = it }
-                                .onFailure { error ->
-                                    Log.w("EutherPingAttachment", "Automatic Vessel image preview failed", error)
-                                }
                         }
+                        result.onSuccess { value = it }
+                            .onFailure { error ->
+                                Log.w("EutherPingAttachment", "On-demand Vessel image preview failed", error)
+                                secureImagePreviewError = error.message ?: "Could not decrypt image"
+                                secureImagePreviewRequested = false
+                            }
                     }
                 }
                 secureImagePreview?.let { bitmap ->
@@ -2921,8 +2921,25 @@ private fun MessageBubble(
                             ),
                     )
                 }
+                secureImagePreviewError?.let { error ->
+                    Text(
+                        error,
+                        color = MaterialTheme.colorScheme.error,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 9.sp,
+                        modifier = Modifier.padding(top = 7.dp),
+                    )
+                }
                 Button(
-                    onClick = { onAttachment(attachment) },
+                    onClick = {
+                        if (previewableSecureImage && secureImagePreview == null
+                        ) {
+                            secureImagePreviewError = null
+                            secureImagePreviewRequested = true
+                        } else {
+                            onAttachment(attachment)
+                        }
+                    },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Violet.copy(alpha = 0.2f),
                         contentColor = Violet,
@@ -2931,6 +2948,8 @@ private fun MessageBubble(
                 ) {
                     Text(
                         when {
+                            previewableSecureImage &&
+                                secureImagePreview == null -> "DECRYPT // SHOW IMAGE"
                             !attachment.incoming -> "OPEN VERIFIED FILE"
                             downloaded || secureImagePreview != null -> "OPEN VERIFIED FILE"
                             else -> "DOWNLOAD // ${attachment.transportLabel}"

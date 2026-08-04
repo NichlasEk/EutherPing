@@ -93,6 +93,10 @@ changed; group replies cannot accidentally become separate one-to-one threads.
 
 ## Phase 6 — reviewed Secure Vessels protocol
 
+- Keep Vessel plaintext and attachments separate from ordinary SMS/MMS state:
+  only encrypted wire capsules may live in Telephony, sent plaintext stays in a
+  Keystore-protected vault, attachment payloads stay encrypted in private app
+  storage, and image preview decrypts in memory only after explicit user action.
 - Add replay tracking and reject duplicate or stale authenticated frames.
 - Select a reviewed asynchronous messaging session protocol/library that
   provides forward secrecy and post-compromise security. Do not design a custom
@@ -141,3 +145,9 @@ as complete.
   in the same Android thread. Emulator provider tests cover group identity; the
   documented Samsung/GrapheneOS carrier, roaming, Wi-Fi-calling and
   mobile-data-off matrix remains the physical acceptance gate.
+- `0.8.5`: first phase 6 hardening checkpoint — Secure attachment download stores
+  ciphertext only; image preview is an explicit action and performs bounded,
+  authenticated in-memory decryption with no plaintext preview file. Temporary
+  open/save copies are private and crash leftovers are cleared at startup.
+  Instrumentation covers memory preview, tamper rejection and cleanup. Replay
+  protection and migration to a reviewed session protocol remain unfinished.

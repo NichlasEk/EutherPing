@@ -49,13 +49,33 @@ class TransportTest {
         assertTrue(SecureAttachmentRepository.isDisplayableImage("image/jpeg"))
         assertTrue(SecureAttachmentRepository.isDisplayableImage("IMAGE/PNG"))
         assertFalse(SecureAttachmentRepository.isDisplayableImage("application/pdf"))
+        assertTrue(
+            SecureAttachmentRepository.canPreviewInMemory(
+                descriptor(url = null, bluetooth = true, mimeType = "image/png", plaintextSize = 1024),
+            ),
+        )
+        assertFalse(
+            SecureAttachmentRepository.canPreviewInMemory(
+                descriptor(
+                    url = null,
+                    bluetooth = true,
+                    mimeType = "image/png",
+                    plaintextSize = 32L * 1024 * 1024 + 1,
+                ),
+            ),
+        )
     }
 
-    private fun descriptor(url: String?, bluetooth: Boolean) = SecureAttachmentDescriptor(
+    private fun descriptor(
+        url: String?,
+        bluetooth: Boolean,
+        mimeType: String = "application/octet-stream",
+        plaintextSize: Long = 1,
+    ) = SecureAttachmentDescriptor(
         id = "00000000-0000-4000-8000-000000000000",
         name = "test.bin",
-        mimeType = "application/octet-stream",
-        plaintextSize = 1,
+        mimeType = mimeType,
+        plaintextSize = plaintextSize,
         plaintextSha256 = "0".repeat(64),
         ciphertextSize = 17,
         ciphertextSha256 = "1".repeat(64),
