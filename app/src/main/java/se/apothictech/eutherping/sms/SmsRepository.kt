@@ -92,6 +92,15 @@ data class SmsMessagePage(
     val hasOlder: Boolean,
 )
 
+data class SmsSearchHit(
+    val messageId: Long,
+    val threadId: Long,
+    val address: String,
+    val text: String,
+    val timestamp: Long,
+    val incoming: Boolean,
+)
+
 data class CarrierMmsAttachment(
     val uri: Uri,
     val mimeType: String,
@@ -532,6 +541,71 @@ object SmsRepository {
             hasOlder = smsTruncated || mmsTruncated || newest.size > limit,
         )
     }
+
+    fun searchMessages(
+        context: Context,
+        query: String,
+        secureLane: Boolean,
+        limit: Int = 50,
+    ): Result<List<SmsSearchHit>> = runCatching {
+        check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
+        val needle = query.trim()
+        if (needle.isBlank()) return@runCatching emptyList()
+        val secureClause = secureBodyPrefixesClause()
+        val selection: String
+        val arguments: Array<String>
+        val queryLimit: Int
+        if (secureLane) {
+            selection = "($secureClause)"
+            arguments = SecureRepository.secureBodyPrefixes.map { "$it%" }.toTypedArray()
+            queryLimit = maxOf(limit * 6, 240)
+        } else {
+            selection = "${Telephony.Sms.BODY} LIKE ? AND NOT ($secureClause)"
+            arguments = arrayOf("%$needle%") + SecureRepository.secureBodyPrefixes.map { "$it%" }
+            queryLimit = limit
+        }
+        val hits = mutableListOf<SmsSearchHit>()
+        queryNewest(
+            context,
+            Telephony.Sms.CONTENT_URI,
+            arrayOf(
+                Telephony.Sms._ID,
+                Telephony.Sms.THREAD_ID,
+                Telephony.Sms.ADDRESS,
+                Telephony.Sms.BODY,
+                Telephony.Sms.DATE,
+                Telephony.Sms.TYPE,
+            ),
+            selection,
+            arguments,
+            Telephony.Sms.DATE,
+            queryLimit,
+        )?.use { cursor ->
+            while (cursor.moveToNext() && hits.size < limit) {
+                val address = cursor.getString(2).orEmpty()
+                val body = cursor.getString(3).orEmpty()
+                val incoming = cursor.getInt(5) == Telephony.Sms.MESSAGE_TYPE_INBOX
+                val display = if (secureLane) {
+                    SecureRepository.decodeForDisplay(context, address, body, incoming)?.text ?: continue
+                } else {
+                    body
+                }
+                if (!display.contains(needle, ignoreCase = true)) continue
+                hits += SmsSearchHit(
+                    messageId = cursor.getLong(0),
+                    threadId = cursor.getLong(1),
+                    address = address,
+                    text = display,
+                    timestamp = cursor.getLong(4),
+                    incoming = incoming,
+                )
+            }
+        }
+        hits
+    }
+
+    private fun secureBodyPrefixesClause(): String =
+        SecureRepository.secureBodyPrefixes.joinToString(" OR ") { "${Telephony.Sms.BODY} LIKE ?" }
 
     private fun queryNewest(
         context: Context,

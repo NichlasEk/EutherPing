@@ -152,6 +152,7 @@ import se.apothictech.eutherping.sms.CachedConversationIndex
 import se.apothictech.eutherping.sms.ConversationIndexCache
 import se.apothictech.eutherping.sms.SmsRepository
 import se.apothictech.eutherping.sms.SmsConversationIndexEntry
+import se.apothictech.eutherping.sms.SmsSearchHit
 import se.apothictech.eutherping.sms.MessageDeliveryState
 import se.apothictech.eutherping.sms.deliveryState
 import kotlinx.coroutines.Dispatchers
@@ -214,6 +215,7 @@ private data class Conversation(
     val distance: String,
     val smsAddress: String? = null,
     val threadId: Long? = null,
+    val hasDraft: Boolean = false,
 )
 
 private data class DemoMessage(
@@ -256,6 +258,12 @@ private data class DeckHistory(
 
 private data class ContactsState(
     val contacts: List<PhoneContact> = emptyList(),
+    val loading: Boolean = false,
+    val error: String? = null,
+)
+
+private data class MessageSearchState(
+    val hits: List<SmsSearchHit> = emptyList(),
     val loading: Boolean = false,
     val error: String? = null,
 )
@@ -468,6 +476,7 @@ private fun EutherPingApp(
     val context = LocalContext.current
     var appTheme by rememberSaveable { mutableStateOf(loadAppTheme(context)) }
     var activeConversation by remember { mutableStateOf<Conversation?>(null) }
+    var draftRevision by remember { mutableIntStateOf(0) }
     var selectedTab by rememberSaveable { mutableStateOf(SignalTab.SIGNALS) }
     var biometricGateEnabled by remember { mutableStateOf(VesselBiometricGate.isEnabled(context)) }
     var vesselsUnlocked by remember { mutableStateOf(false) }
@@ -562,8 +571,12 @@ private fun EutherPingApp(
             onAddressConsumed()
         }
     }
-    BackHandler(enabled = activeConversation != null) {
+    fun closeConversation() {
         activeConversation = null
+        draftRevision++
+    }
+    BackHandler(enabled = activeConversation != null) {
+        closeConversation()
     }
     val isLightTheme = appTheme == AppTheme.LIGHT
     val scheme = if (isLightTheme) {
@@ -634,6 +647,7 @@ private fun EutherPingApp(
                                 isDefaultSmsApp = isDefaultSmsApp,
                                 hasSmsPermissions = hasSmsPermissions,
                                 smsRevision = smsRevision,
+                                draftRevision = draftRevision,
                                 permissionRevision = setupRevision,
                                 appTheme = appTheme,
                                 interactionEnabled = activeConversation == null,
@@ -661,7 +675,7 @@ private fun EutherPingApp(
                             ConversationDeck(
                                 conversation = conversation,
                                 smsRevision = smsRevision,
-                                onBack = { activeConversation = null },
+                                onBack = ::closeConversation,
                             )
                         }
                         if (showVesselGate) {
@@ -768,6 +782,7 @@ private fun SignalDeck(
     isDefaultSmsApp: Boolean,
     hasSmsPermissions: Boolean,
     smsRevision: Int,
+    draftRevision: Int,
     permissionRevision: Int,
     appTheme: AppTheme,
     biometricGateEnabled: Boolean,
@@ -779,6 +794,8 @@ private fun SignalDeck(
 ) {
     val context = LocalContext.current
     var showContactSearch by rememberSaveable { mutableStateOf(false) }
+    var showMessageSearch by rememberSaveable { mutableStateOf(false) }
+    var messageSearchQuery by rememberSaveable { mutableStateOf("") }
     var contactPermissionRevision by remember { mutableIntStateOf(0) }
     val contactsPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -854,8 +871,29 @@ private fun SignalDeck(
             refreshed
         }
     }
-    val history = remember(unlabelledHistory, phoneContacts) {
-        applyContactNames(unlabelledHistory, phoneContacts)
+    val history = remember(unlabelledHistory, phoneContacts, draftRevision) {
+        applyContactNames(unlabelledHistory, phoneContacts).let { named ->
+            named.copy(
+                signals = named.signals.map { conversation ->
+                    conversation.copy(
+                        hasDraft = DraftRepository.hasDraft(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            secure = false,
+                        ),
+                    )
+                },
+                vessels = named.vessels.map { conversation ->
+                    conversation.copy(
+                        hasDraft = DraftRepository.hasDraft(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            secure = true,
+                        ),
+                    )
+                },
+            )
+        }
     }
 
     fun openContactSearch() {
@@ -866,8 +904,13 @@ private fun SignalDeck(
         }
     }
 
-    BackHandler(enabled = interactionEnabled && (showContactSearch || selectedTab != SignalTab.SIGNALS)) {
-        if (showContactSearch) {
+    BackHandler(
+        enabled = interactionEnabled && (showContactSearch || showMessageSearch || selectedTab != SignalTab.SIGNALS),
+    ) {
+        if (showMessageSearch) {
+            showMessageSearch = false
+            messageSearchQuery = ""
+        } else if (showContactSearch) {
             showContactSearch = false
         } else {
             onSelectedTabChange(SignalTab.SIGNALS)
@@ -888,7 +931,53 @@ private fun SignalDeck(
                 .fillMaxSize()
                 .padding(insets),
         ) {
-            if (showContactSearch) {
+            if (showMessageSearch) {
+                val searchState by produceState(
+                    initialValue = MessageSearchState(),
+                    messageSearchQuery,
+                    selectedTab,
+                    realSmsReady,
+                ) {
+                    val query = messageSearchQuery.trim()
+                    if (!realSmsReady || query.isBlank()) {
+                        value = MessageSearchState()
+                    } else {
+                        value = MessageSearchState(loading = true)
+                        delay(250)
+                        value = withContext(Dispatchers.IO) {
+                            SmsRepository.searchMessages(
+                                context,
+                                query,
+                                secureLane = selectedTab == SignalTab.CONTACTS,
+                            ).fold(
+                                onSuccess = { MessageSearchState(hits = it) },
+                                onFailure = { MessageSearchState(error = it.message ?: it.javaClass.simpleName) },
+                            )
+                        }
+                    }
+                }
+                MessageSearchScreen(
+                    query = messageSearchQuery,
+                    onQueryChange = { messageSearchQuery = it },
+                    secure = selectedTab == SignalTab.CONTACTS,
+                    state = searchState,
+                    onBack = {
+                        showMessageSearch = false
+                        messageSearchQuery = ""
+                    },
+                    onOpen = { hit ->
+                        showMessageSearch = false
+                        messageSearchQuery = ""
+                        onOpenConversation(
+                            if (selectedTab == SignalTab.CONTACTS) {
+                                secureConversation(hit.address, hit.threadId, null)
+                            } else {
+                                cellConversation(hit.address, hit.threadId, null)
+                            },
+                        )
+                    },
+                )
+            } else if (showContactSearch) {
                 ContactSearchScreen(
                     contacts = phoneContacts,
                     loading = contactsState.loading,
@@ -911,6 +1000,10 @@ private fun SignalDeck(
                     onSearch = if (selectedTab == SignalTab.SYSTEM) null else ::openContactSearch,
                     onRefresh = { historyRetry++ },
                     onOpenSystem = { onSelectedTabChange(SignalTab.SYSTEM) },
+                    onSearchMessages = {
+                        messageSearchQuery = ""
+                        showMessageSearch = true
+                    },
                     searchDescription = if (selectedTab == SignalTab.CONTACTS) {
                         "Find a vessel"
                     } else {
@@ -958,6 +1051,7 @@ private fun DeckHeader(
     onSearch: (() -> Unit)?,
     onRefresh: () -> Unit,
     onOpenSystem: () -> Unit,
+    onSearchMessages: () -> Unit,
     searchDescription: String,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
@@ -1002,6 +1096,15 @@ private fun DeckHeader(
             Icon(Icons.Default.MoreVert, contentDescription = "More", tint = Muted)
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
+            if (onSearch != null) {
+                DropdownMenuItem(
+                    text = { Text("Search messages") },
+                    onClick = {
+                        menuExpanded = false
+                        onSearchMessages()
+                    },
+                )
+            }
             DropdownMenuItem(
                 text = { Text("Refresh messages") },
                 onClick = {
@@ -1370,8 +1473,8 @@ private fun ConversationRow(conversation: Conversation, onClick: () -> Unit) {
                 Spacer(Modifier.height(4.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        conversation.preview,
-                        color = if (conversation.unread > 0) Mist else Muted,
+                        if (conversation.hasDraft) "Draft · ${conversation.preview}" else conversation.preview,
+                        color = if (conversation.hasDraft || conversation.unread > 0) accent else Muted,
                         fontSize = 13.sp,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
@@ -1426,6 +1529,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     var forwardingMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var deleteMessageCandidate by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var showDeleteConversation by remember(conversation.id) { mutableStateOf(false) }
+    var conversationSearchVisible by rememberSaveable(conversation.id) { mutableStateOf(false) }
+    var conversationSearchQuery by rememberSaveable(conversation.id) { mutableStateOf("") }
     var messageLimit by remember(conversation.id) { mutableIntStateOf(INITIAL_CONVERSATION_MESSAGES) }
     var loadedMessageLimit by remember(conversation.id) { mutableIntStateOf(0) }
     var messagePageLoading by remember(conversation.id) { mutableStateOf(false) }
@@ -1585,11 +1690,38 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     } else {
         demoMessages
     }
+    val displayedMessages = remember(messages, conversationSearchQuery) {
+        val query = conversationSearchQuery.trim()
+        if (query.isBlank()) messages else messages.filter { message ->
+            message.text.contains(query, ignoreCase = true)
+        }
+    }
     var composerTransport by rememberSaveable(conversation.id) {
         mutableStateOf(conversation.transport)
     }
-    var draft by rememberSaveable(conversation.id) { mutableStateOf("") }
-    var pendingCarrierMmsUri by rememberSaveable(conversation.id) { mutableStateOf<Uri?>(null) }
+    val storedDraft = remember(conversation.id, conversation.smsAddress, secureLane) {
+        DraftRepository.load(context, conversation.smsAddress.orEmpty(), secureLane)
+    }
+    var draft by rememberSaveable(conversation.id) { mutableStateOf(storedDraft.text) }
+    var pendingCarrierMmsUri by rememberSaveable(conversation.id) {
+        mutableStateOf(storedDraft.carrierImageUri)
+    }
+    LaunchedEffect(draft, pendingCarrierMmsUri, conversation.id) {
+        if (!isRealSms) return@LaunchedEffect
+        delay(350)
+        withContext(Dispatchers.IO) {
+            DraftRepository.save(
+                context,
+                conversation.smsAddress.orEmpty(),
+                secureLane,
+                draft,
+                pendingCarrierMmsUri,
+            )
+        }
+    }
+    fun clearStoredDraft() {
+        DraftRepository.clear(context, conversation.smsAddress.orEmpty(), secureLane)
+    }
     val focusManager = LocalFocusManager.current
     val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri != null && isRealSms && (!secureLane || securePeer?.canEncrypt == true)) {
@@ -1683,6 +1815,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     attachmentBusy = false
                 }
                 result.onSuccess {
+                    clearStoredDraft()
                     draft = ""
                     pendingCarrierMmsUri = null
                     runCatching {
@@ -1719,6 +1852,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     }
                 }
                     .onSuccess {
+                        clearStoredDraft()
                         draft = ""
                         focusManager.clearFocus()
                         Toast.makeText(
@@ -1757,6 +1891,17 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             ConversationHeader(
                 conversation = conversation,
                 securePeerState = securePeer?.state,
+                searchVisible = conversationSearchVisible,
+                searchQuery = conversationSearchQuery,
+                onSearchQueryChange = { conversationSearchQuery = it },
+                onToggleSearch = {
+                    conversationSearchVisible = !conversationSearchVisible
+                    if (conversationSearchVisible) {
+                        messageLimit = maxOf(messageLimit, 200)
+                    } else {
+                        conversationSearchQuery = ""
+                    }
+                },
                 onDeleteConversation = { showDeleteConversation = true },
                 onBack = onBack,
             )
@@ -1846,7 +1991,18 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                         )
                     }
                 }
-                items(messages.asReversed(), key = { it.id }) { message ->
+                if (conversationSearchQuery.isNotBlank() && displayedMessages.isEmpty()) {
+                    item(key = "no-search-results") {
+                        Text(
+                            "NO MATCHES IN THE LOADED MESSAGE ARRAY",
+                            color = Muted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 18.dp),
+                        )
+                    }
+                }
+                items(displayedMessages.asReversed(), key = { it.id }) { message ->
                     MessageBubble(
                         message = message,
                         attachmentRevision = attachmentRevision + smsRevision,
@@ -2219,6 +2375,10 @@ private fun ImageActionsDialog(
 private fun ConversationHeader(
     conversation: Conversation,
     securePeerState: SecurePeerState?,
+    searchVisible: Boolean,
+    searchQuery: String,
+    onSearchQueryChange: (String) -> Unit,
+    onToggleSearch: () -> Unit,
     onDeleteConversation: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -2255,6 +2415,9 @@ private fun ConversationHeader(
                     letterSpacing = 0.5.sp,
                 )
             }
+            IconButton(onClick = onToggleSearch) {
+                Icon(Icons.Default.Search, contentDescription = "Search this conversation", tint = accent)
+            }
             IconButton(onClick = { menuExpanded = true }) {
                 Icon(Icons.Default.MoreVert, contentDescription = "Conversation options", tint = Muted)
             }
@@ -2276,6 +2439,15 @@ private fun ConversationHeader(
                     )
                 }
             }
+        }
+        AnimatedVisibility(visible = searchVisible) {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                label = { Text("Search loaded messages") },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+            )
         }
         HorizontalDivider(color = accent.copy(alpha = 0.2f))
     }
@@ -2559,6 +2731,86 @@ private fun LinkifiedMessageText(text: String) {
         }
     }
     Text(annotated, color = Mist, fontSize = 15.sp, lineHeight = 20.sp)
+}
+
+@Composable
+private fun MessageSearchScreen(
+    query: String,
+    onQueryChange: (String) -> Unit,
+    secure: Boolean,
+    state: MessageSearchState,
+    onBack: () -> Unit,
+    onOpen: (SmsSearchHit) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back", tint = Toxic)
+            }
+            Text(
+                if (secure) "SEARCH VESSEL ECHOES" else "SEARCH CELL MESSAGES",
+                color = if (secure) Violet else Amber,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f),
+            )
+        }
+        OutlinedTextField(
+            value = query,
+            onValueChange = onQueryChange,
+            label = { Text("Message text") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 10.dp),
+        )
+        if (secure) {
+            Text(
+                "Only a bounded recent set is decrypted for this on-device search. Search text is never cached.",
+                color = Violet.copy(alpha = 0.72f),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(bottom = 9.dp),
+            )
+        }
+        when {
+            state.loading -> Text("SEARCHING MESSAGE ARRAY…", color = Muted, fontFamily = FontFamily.Monospace)
+            state.error != null -> Text(state.error, color = Amber, fontSize = 13.sp)
+            query.isNotBlank() && state.hits.isEmpty() ->
+                Text("NO MATCHES", color = Muted, fontFamily = FontFamily.Monospace)
+        }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
+        ) {
+            items(state.hits, key = { it.messageId }) { hit ->
+                val accent = if (secure) Violet else Amber
+                Card(
+                    modifier = Modifier.fillMaxWidth().clickable { onOpen(hit) },
+                    colors = CardDefaults.cardColors(containerColor = Panel),
+                    border = BorderStroke(1.dp, accent.copy(alpha = 0.3f)),
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth().padding(13.dp)) {
+                        Row {
+                            Text(
+                                hit.address,
+                                color = accent,
+                                fontFamily = FontFamily.Monospace,
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(formatMessageTime(hit.timestamp), color = Muted, fontSize = 10.sp)
+                        }
+                        Text(
+                            hit.text,
+                            color = Mist,
+                            maxLines = 3,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.padding(top = 5.dp),
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable

@@ -792,6 +792,40 @@ object SecureRepository {
         )
     }.getOrNull()
 
+    fun saveEncryptedDraft(context: Context, draftId: String, plaintext: String) {
+        val storageKey = encryptedDraftStorageKey(draftId)
+        if (plaintext.isBlank()) {
+            context.getSharedPreferences(VAULT_PREFS, Context.MODE_PRIVATE)
+                .edit()
+                .remove(storageKey)
+                .apply()
+            return
+        }
+        val associatedData = "draft|$draftId".toByteArray(UTF_8)
+        val encrypted = vaultAead(context).encrypt(plaintext.toByteArray(UTF_8), associatedData)
+        context.getSharedPreferences(VAULT_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .putString(storageKey, encode(encrypted))
+            .apply()
+    }
+
+    fun loadEncryptedDraft(context: Context, draftId: String): String? = runCatching {
+        val encrypted = context.getSharedPreferences(VAULT_PREFS, Context.MODE_PRIVATE)
+            .getString(encryptedDraftStorageKey(draftId), null) ?: return null
+        val associatedData = "draft|$draftId".toByteArray(UTF_8)
+        String(vaultAead(context).decrypt(decode(encrypted), associatedData), UTF_8)
+    }.getOrNull()
+
+    fun clearEncryptedDraft(context: Context, draftId: String) {
+        context.getSharedPreferences(VAULT_PREFS, Context.MODE_PRIVATE)
+            .edit()
+            .remove(encryptedDraftStorageKey(draftId))
+            .apply()
+    }
+
+    private fun encryptedDraftStorageKey(draftId: String): String =
+        "draft.${encode(MessageDigest.getInstance("SHA-256").digest(draftId.toByteArray(UTF_8)))}"
+
     private fun registerCrypto() {
         if (cryptoRegistered) return
         synchronized(this) {

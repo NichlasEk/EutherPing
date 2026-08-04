@@ -113,3 +113,12 @@ physical Samsung and GrapheneOS acceptance before the following risky carrier
 phase. Completed checkpoints are pushed and published as versioned APKs through
 EutherOxide; unfinished phases remain documented here rather than being marketed
 as complete.
+
+## Checkpoints
+
+- `0.8.0`: phases 1 and 2 shipped — biometric Vessel gate and provider-backed
+  SMS/MMS delivery, failure details, and retry.
+- `0.8.1`: first phase 3 slice — ordinary notification quick reply, persistent
+  per-conversation text/image drafts (Keystore-encrypted for Vessels), bounded
+  on-device message-text search, and active-conversation search. Secure
+  notifications intentionally do not accept lock-screen plaintext replies.

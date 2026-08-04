@@ -125,7 +125,39 @@ class CarrierMmsRepositoryTest {
             "Carrier MMS notification did not prefer the contact name",
             notification.extras.getCharSequence(Notification.EXTRA_TITLE) == "Ada Lovelace",
         )
+        val reply = notification.actions?.firstOrNull { it.title.toString() == "REPLY" }
+        assertNotNull("Ordinary carrier notification did not expose REPLY", reply)
+        assertTrue(
+            "REPLY action did not carry Android RemoteInput",
+            reply!!.remoteInputs?.any { it.resultKey == NotificationReplyReceiver.REMOTE_INPUT_KEY } == true,
+        )
         manager.cancel("+46701234567".hashCode())
+    }
+
+    @Test
+    fun secureNotificationNeverAcceptsLockScreenPlaintextReply() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        val manager = context.getSystemService(NotificationManager::class.java)
+        manager.cancelAll()
+        val address = "+46707654321"
+
+        IncomingMessageNotifier.show(
+            context,
+            address,
+            "Encrypted Secure Ping",
+            secureLane = true,
+            displayName = "Verified Vessel",
+        )
+
+        val notification = manager.activeNotifications
+            .firstOrNull { it.id == address.hashCode() }
+            ?.notification
+        assertNotNull("Secure notification was not posted", notification)
+        assertFalse(
+            "Secure notification must not expose plaintext RemoteInput",
+            notification!!.actions?.any { it.title.toString() == "REPLY" } == true,
+        )
+        manager.cancel(address.hashCode())
     }
 
     @Test

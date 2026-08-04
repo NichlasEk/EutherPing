@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.RemoteInput
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import se.apothictech.eutherping.MainActivity
@@ -75,6 +76,35 @@ object IncomingMessageNotifier {
                 .setShowsUserInterface(false)
                 .build()
         }
+        val replyAction = if (!secureLane) {
+            val replyIntent = Intent(context, NotificationReplyReceiver::class.java).apply {
+                action = NotificationReplyReceiver.ACTION_REPLY
+                putExtra(NotificationReplyReceiver.EXTRA_ADDRESS, address)
+                putExtra(EXTRA_THREAD_ID, threadId ?: -1L)
+                putExtra(NotificationReplyReceiver.EXTRA_NOTIFICATION_ID, address.hashCode())
+            }
+            val replyPendingIntent = PendingIntent.getBroadcast(
+                context,
+                37 * address.hashCode(),
+                replyIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
+            )
+            NotificationCompat.Action.Builder(
+                R.drawable.ic_eutherping,
+                "REPLY",
+                replyPendingIntent,
+            )
+                .addRemoteInput(
+                    RemoteInput.Builder(NotificationReplyReceiver.REMOTE_INPUT_KEY)
+                        .setLabel("Reply")
+                        .build(),
+                )
+                .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_REPLY)
+                .setShowsUserInterface(false)
+                .build()
+        } else {
+            null
+        }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_eutherping)
             .setContentTitle(displayName ?: address)
@@ -85,8 +115,28 @@ object IncomingMessageNotifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .apply { markReadAction?.let(::addAction) }
+            .apply {
+                replyAction?.let(::addAction)
+                markReadAction?.let(::addAction)
+            }
             .build()
         NotificationManagerCompat.from(context).notify(address.hashCode(), notification)
+    }
+
+    fun showReplyFailure(context: Context, address: String, notificationId: Int, detail: String?) {
+        if (Build.VERSION.SDK_INT >= 33 &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+            PackageManager.PERMISSION_GRANTED
+        ) return
+        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+            .setSmallIcon(R.drawable.ic_eutherping)
+            .setContentTitle("Reply not sent")
+            .setContentText(detail ?: "Open EutherPing to retry")
+            .setCategory(NotificationCompat.CATEGORY_ERROR)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setAutoCancel(true)
+            .build()
+        NotificationManagerCompat.from(context).notify(notificationId, notification)
     }
 }

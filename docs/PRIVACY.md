@@ -26,6 +26,7 @@ Contacts stay on the device. EutherPing does not upload the address book. Select
 
 - Ordinary SMS and MMS history is stored in Android's system Telephony provider and follows Android's message deletion and device-retention behavior.
 - Secure Ping private keys and the sent-text display vault are stored in app-private storage protected by Android Keystore.
+- Ordinary text and pending-image draft references are stored in app-private preferences. Vessel draft text is encrypted by the Android-Keystore-protected vault, and cleared after a successful send or explicit draft removal.
 - Secure attachment payloads remain encrypted in app-private storage. An inline Vessel image preview uses a short-lived plaintext cache file that is deleted immediately after bounded decoding. Explicitly opening a verified file creates a plaintext viewing copy scheduled for deletion after ten minutes; remaining view-cache files are cleared on the next app start.
 - Temporary MMS transport PDU files are stored in private cache and deleted after completion or by Android cache management.
 - Android cloud backup and device transfer are disabled for the app.
@@ -35,6 +36,11 @@ Contacts stay on the device. EutherPing does not upload the address book. Select
 EutherPing 0.8.0 has no developer account system, analytics, ads, telemetry, or EutherPing-operated message relay. The developer does not collect or sell message, contact, file, or usage data. A private app file caches ordinary conversation previews and non-secret Vessel metadata for fast startup; decrypted Secure Ping text is deliberately replaced by a neutral placeholder in that index. The Vessel seal's enabled/disabled choice is stored in local app preferences, while authentication is handled entirely by Android. Data is disclosed to a mobile operator only when the user chooses carrier SMS or MMS, to the intended paired phone as encrypted Bluetooth attachment ciphertext, and to another selected app when the user explicitly opens an attachment using Android's viewer mechanism.
 
 Direct Wi-Fi and Bluetooth attachment transfer do not send data to an EutherPing backend. The peer receives ciphertext and can decrypt it only with the intended verified Vessel identity.
+
+Message search is performed locally over bounded provider results. Secure search
+queries and decrypted results are not cached. Ordinary notification quick reply
+passes the typed reply directly to Android's carrier SMS/MMS path; Secure
+notifications do not accept plaintext RemoteInput replies.
 
 ## Security and limitations
 

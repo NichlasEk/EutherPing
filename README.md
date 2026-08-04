@@ -1,11 +1,18 @@
 # EutherPing
 
-Version 0.8.0 adds a default-on Android biometric seal for Secure Vessels with
-an animated purple-green fingerprint scanner and foreground-session relocking.
+Version 0.8.1 adds ordinary notification quick reply, persistent conversation
+drafts, and bounded on-device message search. Vessel draft text is encrypted
+under the Android Keystore vault, and Secure notifications intentionally do not
+accept plaintext lock-screen replies. Version 0.8.0 added a default-on Android
+biometric seal for Secure Vessels with an animated purple-green fingerprint
+scanner and foreground-session relocking.
 Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 `FAILED` state. Multipart SMS waits for every part before advancing, while a
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
+
+The current release is `0.8.1`; the detailed `0.8.0` overview below describes
+the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
 
