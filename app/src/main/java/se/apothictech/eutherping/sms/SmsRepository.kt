@@ -676,13 +676,13 @@ object SmsRepository {
         return text to attachment
     }
 
-    fun markThreadRead(context: Context, threadId: Long?) {
-        if (threadId == null || !isDefaultSmsApp(context)) return
+    fun markThreadRead(context: Context, threadId: Long?): Boolean {
+        if (threadId == null || !isDefaultSmsApp(context)) return false
         val values = ContentValues().apply {
             put(Telephony.Sms.READ, 1)
             put(Telephony.Sms.SEEN, 1)
         }
-        runCatching {
+        return runCatching {
             context.contentResolver.update(
                 Telephony.Sms.CONTENT_URI,
                 values,
@@ -695,8 +695,21 @@ object SmsRepository {
                 "${Telephony.Mms.THREAD_ID} = ?",
                 arrayOf(threadId.toString()),
             )
-        }
+            true
+        }.getOrDefault(false)
     }
+
+    fun threadIdForMessage(context: Context, messageUri: Uri): Long? = runCatching {
+        context.contentResolver.query(
+            messageUri,
+            arrayOf(Telephony.Sms.THREAD_ID),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0).takeIf { it > 0L } else null
+        }
+    }.getOrNull()
 
     fun deleteMessage(context: Context, messageId: Long, isMms: Boolean): Result<Unit> = runCatching {
         check(isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }

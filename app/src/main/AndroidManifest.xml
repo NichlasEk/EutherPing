@@ -78,6 +78,10 @@
             android:name=".sms.MmsDownloadedReceiver"
             android:exported="false" />
 
+        <receiver
+            android:name=".sms.MarkMessageReadReceiver"
+            android:exported="false" />
+
         <service
             android:name=".sms.RespondViaMessageService"
             android:exported="true"

@@ -13,6 +13,7 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -21,6 +22,83 @@ import java.io.File
 
 @RunWith(AndroidJUnit4::class)
 class CarrierMmsRepositoryTest {
+    @Test
+    fun notificationMarkAsReadActionUpdatesAndroidHistory() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("cmd role add-role-holder android.app.role.SMS ${context.packageName}")
+            .close()
+        Thread.sleep(500)
+        assertTrue("Test app did not become the default SMS handler", SmsRepository.isDefaultSmsApp(context))
+
+        val address = "15559876543"
+        val persistedMessageUri = SmsRepository.persistIncoming(
+            context,
+            address,
+            "Mark this notification as read",
+            System.currentTimeMillis(),
+        )
+        assertNotNull("Incoming test SMS was not persisted", persistedMessageUri)
+        val messageUri = persistedMessageUri!!
+        val threadId = SmsRepository.threadIdForMessage(context, messageUri)
+        assertNotNull("Persisted SMS did not expose a thread id", threadId)
+
+        IncomingMessageNotifier.show(
+            context = context,
+            address = address,
+            body = "Mark this notification as read",
+            secureLane = false,
+            threadId = threadId,
+        )
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val notification = manager.activeNotifications
+            .firstOrNull { it.id == address.hashCode() }
+            ?.notification
+        assertNotNull("Incoming message notification was not posted", notification)
+        val markReadAction = notification!!.actions
+            ?.firstOrNull { it.title.toString() == "MARK AS READ" }
+        assertNotNull("Notification did not expose MARK AS READ", markReadAction)
+
+        markReadAction!!.actionIntent.send()
+        val markedRead = repeatUntil(timeoutMillis = 2_000L) {
+            context.contentResolver.query(
+                messageUri,
+                arrayOf("read", "seen"),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                cursor.moveToFirst() && cursor.getInt(0) == 1 && cursor.getInt(1) == 1
+            } == true
+        }
+        assertTrue("SMS was not marked read and seen", markedRead)
+
+        context.contentResolver.query(
+            messageUri,
+            arrayOf("read", "seen"),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            assertTrue("Marked SMS disappeared from Android history", cursor.moveToFirst())
+            assertEquals("SMS was not marked read", 1, cursor.getInt(0))
+            assertEquals("SMS was not marked seen", 1, cursor.getInt(1))
+        }
+        assertTrue("Notification remained visible after MARK AS READ", repeatUntil(2_000L) {
+            manager.activeNotifications.none { it.id == address.hashCode() }
+        })
+        context.contentResolver.delete(messageUri, null, null)
+    }
+
+    private fun repeatUntil(timeoutMillis: Long, condition: () -> Boolean): Boolean {
+        val deadline = android.os.SystemClock.elapsedRealtime() + timeoutMillis
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (condition()) return true
+            Thread.sleep(50)
+        }
+        return condition()
+    }
+
     @Test
     fun postsCarrierMmsNotification() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()

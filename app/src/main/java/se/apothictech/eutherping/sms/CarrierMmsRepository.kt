@@ -319,6 +319,7 @@ object CarrierMmsRepository {
                 address = address,
                 body = "Carrier MMS received",
                 secureLane = false,
+                threadId = SmsRepository.threadIdForMessage(context, messageUri),
             )
         }
         messageUri

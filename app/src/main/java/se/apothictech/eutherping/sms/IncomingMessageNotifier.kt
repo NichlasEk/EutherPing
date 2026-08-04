@@ -18,12 +18,14 @@ import se.apothictech.eutherping.contacts.ContactRepository
 
 object IncomingMessageNotifier {
     internal const val CHANNEL_ID = "incoming_sms"
+    internal const val EXTRA_THREAD_ID = "thread_id"
 
     fun show(
         context: Context,
         address: String,
         body: String,
         secureLane: Boolean,
+        threadId: Long? = null,
         displayName: String? = ContactRepository.displayName(context, address),
     ) {
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -52,6 +54,27 @@ object IncomingMessageNotifier {
             openIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
+        val markReadAction = threadId?.let {
+            val markReadIntent = Intent(context, MarkMessageReadReceiver::class.java).apply {
+                action = MarkMessageReadReceiver.ACTION_MARK_AS_READ
+                putExtra(EXTRA_THREAD_ID, it)
+                putExtra(MarkMessageReadReceiver.EXTRA_NOTIFICATION_ID, address.hashCode())
+            }
+            val markReadPendingIntent = PendingIntent.getBroadcast(
+                context,
+                address.hashCode(),
+                markReadIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            NotificationCompat.Action.Builder(
+                R.drawable.ic_eutherping,
+                "MARK AS READ",
+                markReadPendingIntent,
+            )
+                .setSemanticAction(NotificationCompat.Action.SEMANTIC_ACTION_MARK_AS_READ)
+                .setShowsUserInterface(false)
+                .build()
+        }
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_eutherping)
             .setContentTitle(displayName ?: address)
@@ -62,6 +85,7 @@ object IncomingMessageNotifier {
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .apply { markReadAction?.let(::addAction) }
             .build()
         NotificationManagerCompat.from(context).notify(address.hashCode(), notification)
     }

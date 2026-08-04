@@ -17,12 +17,13 @@ class SmsReceiver : BroadcastReceiver() {
         val body = parts.joinToString(separator = "") { it.displayMessageBody.orEmpty() }
         val timestamp = parts.minOfOrNull { it.timestampMillis } ?: System.currentTimeMillis()
         SecureRepository.handleIncomingControl(context, address, body)
-        SmsRepository.persistIncoming(context, address, body, timestamp)
+        val messageUri = SmsRepository.persistIncoming(context, address, body, timestamp)
         IncomingMessageNotifier.show(
             context = context,
             address = address,
             body = SecureRepository.notificationText(context, address, body),
             secureLane = SecureRepository.isSecureBody(body),
+            threadId = messageUri?.let { SmsRepository.threadIdForMessage(context, it) },
         )
     }
 
