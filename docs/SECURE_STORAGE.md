@@ -1,6 +1,6 @@
 # Secure Vessels storage boundary
 
-This document describes EutherPing 0.8.8. It is a storage boundary, not a claim
+This document describes EutherPing 0.8.9. It is a storage boundary, not a claim
 that the current Secure Beta framing is a reviewed ratcheting protocol.
 
 ## What is stored where
@@ -10,7 +10,8 @@ that the current Secure Beta framing is a reviewed ratcheting protocol.
 | Ordinary SMS/MMS | Android Telephony provider | Carrier plaintext and MMS parts |
 | Secure message/offer transport | Android Telephony SMS provider | `EP…` encrypted or public pairing capsule only |
 | Received Secure message plaintext | Not persisted by EutherPing | Decrypted for authenticated Vessel display |
-| Sent Secure message plaintext and drafts | Private app SharedPreferences | Tink AES-GCM ciphertext under Android Keystore |
+| Sent Secure message plaintext and draft text | Dedicated private Secure vault | Tink AES-GCM ciphertext under Android Keystore |
+| Secure draft presence index | Dedicated private Secure draft index | Has-draft flag under a one-way conversation identifier; no text or attachment URI |
 | Secure attachment payload | `filesDir/secure_attachments/{incoming,outgoing}` | AES-256-GCM ciphertext (`.enc`) |
 | Conversation startup index | Private app file | Neutral Vessel placeholder; never Secure plaintext |
 | Accepted-frame replay index | Private app SharedPreferences | Bounded hashes and acceptance times only |
@@ -23,6 +24,11 @@ Secure messages use carrier SMS as their transport, so the encrypted wire
 capsule and carrier metadata necessarily exist in Android Telephony. Secure
 plaintext is never written to the ordinary SMS/MMS provider or the conversation
 index. Carrier/network metadata is not hidden by this design.
+
+Version 0.8.9 also removes Secure draft metadata from the ordinary carrier-draft
+preferences. A legacy hashed Vessel presence flag is migrated once into the
+dedicated Secure index and deleted from the ordinary store. Ordinary draft
+cleanup no longer invokes the Secure vault.
 
 ## Image and file lifecycle
 

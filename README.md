@@ -1,5 +1,12 @@
 # EutherPing
 
+Version 0.8.9 completes the on-device draft namespace split: ordinary Signal
+draft text/image references remain in their carrier draft store, while Vessel
+draft presence metadata now lives in a dedicated Secure index and its text
+remains ciphertext in the Android-Keystore-protected Secure vault. Existing
+Vessel presence flags migrate once and are removed from the ordinary store.
+Clearing an ordinary draft no longer touches the Secure vault.
+
 Version 0.8.8 signs new pairing invitations and acceptances over their public
 keys, millisecond timestamp, and random 128-bit control ID. Fresh controls are
 admitted once through the private replay index; tampered, duplicate, older than
@@ -27,6 +34,9 @@ The current `libsignal`, Vodozemac, and OpenMLS comparison is in
 [`docs/SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](docs/SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md),
 and the independent-review evidence checklist is in
 [`docs/SECURE_EXTERNAL_REVIEW_PACKET.md`](docs/SECURE_EXTERNAL_REVIEW_PACKET.md).
+The requirement-by-requirement implementation, emulator, physical-device, and
+protocol evidence ledger is in
+[`docs/ROADMAP_COMPLETION_AUDIT-2026-08-04.md`](docs/ROADMAP_COMPLETION_AUDIT-2026-08-04.md).
 
 Version 0.8.5 hardens Secure Vessels storage. Encrypted attachment payloads stay
 in a dedicated private app directory and are no longer decrypted merely because
@@ -72,7 +82,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.8`; the detailed `0.8.0` overview below describes
+The current release is `0.8.9`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
@@ -113,7 +123,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Privacy
 
-EutherPing 0.8.8 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext is stored in a Keystore-protected local vault so the sender can read their own history. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
+EutherPing 0.8.9 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext and Vessel drafts are stored in a Keystore-protected local vault with a separate Secure draft index so they never enter the ordinary draft store. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
 
 ## Visual direction
 

@@ -1,6 +1,6 @@
 # Secure Vessels external review packet
 
-Status: reviewer-ready scope and evidence index for EutherPing 0.8.8. This is
+Status: reviewer-ready scope and evidence index for EutherPing 0.8.9. This is
 not an external security review and does not close Phase 6.
 
 ## Review claim boundary
@@ -55,7 +55,8 @@ state handling, not infer safety from the primitives alone.
   transient cache cleanup tests.
 - Conversation-index tests proving Secure plaintext is replaced before cache
   persistence.
-- Full 0.8.8 unit, lint, debug/release, and 32-test instrumentation gate.
+- Full 0.8.9 unit, lint, debug/release, and instrumentation gate, including
+  ordinary/Secure draft namespace separation and legacy metadata migration.
 
 ## Evidence still required
 

@@ -133,6 +133,9 @@ physical Samsung and GrapheneOS acceptance before the following risky carrier
 phase. Completed checkpoints are pushed and published as versioned APKs through
 EutherOxide; unfinished phases remain documented here rather than being marketed
 as complete.
+The current requirement-by-requirement evidence and explicitly missing physical
+or protocol gates are maintained in
+[`ROADMAP_COMPLETION_AUDIT-2026-08-04.md`](ROADMAP_COMPLETION_AUDIT-2026-08-04.md).
 
 ## Checkpoints
 
@@ -193,3 +196,9 @@ as complete.
   assessed against 2026 security evidence, and the external-review scope and
   finding log are ready. No crypto dependency, license, APK, or runtime behavior
   changes in this checkpoint.
+- `0.8.9`: Vessel draft presence metadata moves out of the ordinary carrier
+  draft store into a dedicated Secure index. Vessel text remains ciphertext in
+  the Android-Keystore-protected Secure vault, legacy hashed presence flags
+  migrate once and are deleted, and ordinary draft clearing no longer touches
+  Secure storage. Instrumentation inspects all three stores and proves the
+  plaintext marker enters none of their persisted values.
