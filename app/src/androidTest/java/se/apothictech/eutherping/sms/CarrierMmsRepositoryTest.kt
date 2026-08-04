@@ -351,6 +351,26 @@ class CarrierMmsRepositoryTest {
         ).firstOrNull { it.isMms && it.body == longText }
         assertNotNull("Conversation history did not expose the automatic text MMS", textMms)
         assertTrue("Text-only MMS unexpectedly exposed an image", textMms?.mmsAttachment == null)
+
+        val groupRecipients = listOf("15551234567", "15557654321")
+        val groupMmsUri = CarrierMmsRepository.sendText(
+            context,
+            groupRecipients,
+            "Short group reply-all instrumentation",
+        ).getOrThrow()
+        val groupProviderId = requireNotNull(groupMmsUri.lastPathSegment?.toLongOrNull())
+        val storedParticipants = SmsRepository.mmsParticipants(
+            context,
+            groupProviderId,
+            incoming = false,
+            subscriptionId = null,
+        )
+        assertEquals(groupRecipients.toSet(), storedParticipants.toSet())
+        val groupThreadId = requireNotNull(SmsRepository.threadIdForMessage(context, groupMmsUri))
+        val groupIndex = SmsRepository.loadConversationIndex(context) { false }.getOrThrow()
+            .firstOrNull { it.threadId == groupThreadId }
+        assertNotNull("Group MMS did not retain a participant-based Android thread", groupIndex)
+        assertEquals(groupRecipients.toSet(), groupIndex?.participants?.toSet())
     }
 
     @Test

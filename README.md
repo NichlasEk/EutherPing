@@ -1,5 +1,14 @@
 # EutherPing
 
+Version 0.8.4 adds explicit SIM chips on multi-subscription phones, remembers a
+choice per one-to-one or group conversation, and refuses to silently switch
+away from a remembered SIM that is no longer active. Each carrier bubble and
+inbox row shows its SIM when Android exposes the subscription ID. New Cell
+Signal accepts comma-separated recipients; two or more recipients are composed
+as one participant-based group MMS, and incoming group notifications reply to
+the complete stored participant set. The physical carrier acceptance matrix is
+in [`docs/CARRIER_SIM_GROUP_MMS_TESTING.md`](docs/CARRIER_SIM_GROUP_MMS_TESTING.md).
+
 Version 0.8.3 adds local, privacy-safe performance diagnostics and Android
 Baseline Profiles for startup, opening the inbox and a conversation, and
 scrolling MMS history. System can export a bounded report containing timings,
@@ -26,7 +35,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.3`; the detailed `0.8.0` overview below describes
+The current release is `0.8.4`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
@@ -40,7 +49,7 @@ Long-pressing a message offers copy, forward, and local deletion. Secure forward
 
 Secure Ping pairs two installations with compact public-key invitation and acceptance capsules, shows the same safety code on both phones, and encrypts signed messages to the recipient's public key only after both users verify that code. It uses Google Tink's HPKE construction (X25519, HKDF-SHA-256, AES-256-GCM) and Ed25519 signatures. Private keysets and the local sent-message plaintext vault are protected by Android Keystore. No private key is placed in SMS or the Android Telephony provider.
 
-This is deliberately labelled **Secure Beta**. It does not yet implement a Double Ratchet, forward secrecy, post-compromise security, replay tracking, group encryption, or secure backups. Carrier metadata, delivery records, multipart-SMS cost, and the fact that two numbers communicate remain visible to the mobile network. Carrier MMS is a separate ordinary-telephony feature and is not end-to-end encrypted. Its first beta supports one image plus an optional caption; group MMS, video/audio, manual per-SIM selection, blocking, and backup remain future work.
+This is deliberately labelled **Secure Beta**. It does not yet implement a Double Ratchet, forward secrecy, post-compromise security, replay tracking, group encryption, or secure backups. Carrier metadata, delivery records, multipart-SMS cost, and the fact that two numbers communicate remain visible to the mobile network. Carrier MMS is a separate ordinary-telephony feature and is not end-to-end encrypted. Its first beta supports one image plus an optional caption, group MMS, and manual per-conversation SIM selection. Video/audio, backup, and Secure group messaging remain future work.
 
 ## Try Secure Ping on two phones
 

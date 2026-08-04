@@ -16,6 +16,7 @@ import android.os.Bundle
 import android.provider.Telephony
 import android.telephony.PhoneNumberUtils
 import android.telephony.SmsManager
+import android.telephony.SubscriptionManager
 import androidx.core.content.ContextCompat
 import se.apothictech.eutherping.secure.SecureRepository
 import java.time.Instant
@@ -42,6 +43,7 @@ data class SmsEntry(
     val box: Int,
     val isMms: Boolean = false,
     val mmsAttachment: CarrierMmsAttachment? = null,
+    val subscriptionId: Int? = null,
 )
 
 enum class MessageDeliveryState(val label: String) {
@@ -89,6 +91,7 @@ data class SmsConversationIndexEntry(
     val ordinaryUnread: Int,
     val secureUnread: Int,
     val latestTimestamp: Long,
+    val participants: List<String> = listOf(address),
 )
 
 data class SmsMessagePage(
@@ -126,8 +129,15 @@ object SmsRepository {
         add(Manifest.permission.RECEIVE_MMS)
         add(Manifest.permission.RECEIVE_WAP_PUSH)
         add(Manifest.permission.SEND_SMS)
+        add(Manifest.permission.READ_PHONE_STATE)
+        add(Manifest.permission.READ_PHONE_NUMBERS)
         if (Build.VERSION.SDK_INT >= 33) add("android.permission.POST_NOTIFICATIONS")
     }.toTypedArray()
+
+    val carrierIdentityPermissions = arrayOf(
+        Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.READ_PHONE_NUMBERS,
+    )
 
     fun isDefaultSmsApp(context: Context): Boolean = if (Build.VERSION.SDK_INT >= 29) {
         context.getSystemService(RoleManager::class.java).isRoleHeld(RoleManager.ROLE_SMS)
@@ -141,8 +151,16 @@ object SmsRepository {
     }
 
     fun hasSmsPermissions(context: Context): Boolean = requiredPermissions
-        .filterNot { it == "android.permission.POST_NOTIFICATIONS" }
+        .filterNot {
+            it == "android.permission.POST_NOTIFICATIONS" ||
+                it == Manifest.permission.READ_PHONE_STATE ||
+                it == Manifest.permission.READ_PHONE_NUMBERS
+        }
         .all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }
+
+    fun hasCarrierIdentityPermissions(context: Context): Boolean = carrierIdentityPermissions.all {
+        ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED
+    }
 
     fun loadThreads(context: Context): List<SmsThread> {
         if (!hasSmsPermissions(context)) return emptyList()
@@ -228,6 +246,7 @@ object SmsRepository {
         check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
         data class MutableIndex(
             var address: String = "",
+            var participants: List<String> = emptyList(),
             var latestOrdinary: SmsEntry? = null,
             var latestSecure: SmsEntry? = null,
             var ordinaryUnread: Int = 0,
@@ -245,6 +264,7 @@ object SmsRepository {
             Telephony.Sms.READ,
             Telephony.Sms.TYPE,
             Telephony.Sms.STATUS,
+            Telephony.Sms.SUBSCRIPTION_ID,
         )
         checkNotNull(
             context.contentResolver.query(
@@ -263,6 +283,7 @@ object SmsRepository {
             val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
             val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
             val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
+            val subscriptionIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.SUBSCRIPTION_ID)
             while (cursor.moveToNext()) {
                 val threadId = cursor.getLong(threadIndex)
                 if (threadId <= 0) continue
@@ -279,10 +300,12 @@ object SmsRepository {
                     read = read,
                     status = cursor.getInt(statusIndex),
                     box = type,
+                    subscriptionId = cursor.getInt(subscriptionIndex).takeIf { !cursor.isNull(subscriptionIndex) && it >= 0 },
                 )
                 val index = threads.getOrPut(threadId, ::MutableIndex)
                 val address = cursor.getString(addressIndex).orEmpty()
                 if (address.isNotBlank()) index.address = address
+                if (address.isNotBlank() && index.participants.isEmpty()) index.participants = listOf(address)
                 index.latestTimestamp = maxOf(index.latestTimestamp, timestamp)
                 if (isSecureBody(body)) {
                     index.latestSecure = entry
@@ -294,7 +317,7 @@ object SmsRepository {
             }
         }
 
-        val resolvedMmsAddresses = mutableMapOf<Long, String>()
+        val resolvedMmsParticipants = mutableMapOf<Long, List<String>>()
         loadMmsEntries(
             context,
             threadId = null,
@@ -304,10 +327,14 @@ object SmsRepository {
         ).forEach { mms ->
             val threadId = mms.threadId ?: return@forEach
             val index = threads.getOrPut(threadId, ::MutableIndex)
-            if (index.address.isBlank()) {
-                index.address = resolvedMmsAddresses.getOrPut(threadId) {
-                    mmsAddress(context, mms.id, mms.incoming)
-                }
+            val participants = resolvedMmsParticipants.getOrPut(threadId) {
+                mmsParticipants(context, mms.id, mms.incoming, mms.subscriptionId)
+            }
+            if (participants.isNotEmpty()) {
+                index.participants = participants
+                index.address = participants.joinToString(", ")
+            } else if (index.address.isBlank()) {
+                index.address = mmsAddress(context, mms.id, mms.incoming)
             }
             val entry = SmsEntry(
                 id = -mms.id - 1,
@@ -318,6 +345,7 @@ object SmsRepository {
                 status = mms.messageBox,
                 box = mms.messageBox,
                 isMms = true,
+                subscriptionId = mms.subscriptionId,
             )
             if (index.latestOrdinary == null || mms.timestamp >= index.latestOrdinary!!.timestamp) {
                 index.latestOrdinary = entry
@@ -335,6 +363,7 @@ object SmsRepository {
                 ordinaryUnread = index.ordinaryUnread,
                 secureUnread = index.secureUnread,
                 latestTimestamp = index.latestTimestamp,
+                participants = index.participants.ifEmpty { listOf(index.address).filter(String::isNotBlank) },
             )
         }.sortedByDescending(SmsConversationIndexEntry::latestTimestamp)
     }
@@ -357,6 +386,7 @@ object SmsRepository {
             Telephony.Sms.READ,
             Telephony.Sms.TYPE,
             Telephony.Sms.STATUS,
+            Telephony.Sms.SUBSCRIPTION_ID,
         )
         checkNotNull(
             context.contentResolver.query(
@@ -375,6 +405,7 @@ object SmsRepository {
             val readIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.READ)
             val typeIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.TYPE)
             val statusIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.STATUS)
+            val subscriptionIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.SUBSCRIPTION_ID)
             while (cursor.moveToNext()) {
                 val threadId = cursor.getLong(threadIndex)
                 if (threadId <= 0) continue
@@ -392,6 +423,7 @@ object SmsRepository {
                     read = read,
                     status = cursor.getInt(statusIndex),
                     box = type,
+                    subscriptionId = cursor.getInt(subscriptionIndex).takeIf { !cursor.isNull(subscriptionIndex) && it >= 0 },
                 )
                 val existing = threads[threadId]
                 threads[threadId] = SmsThread(
@@ -417,6 +449,7 @@ object SmsRepository {
                 box = mms.messageBox,
                 isMms = true,
                 mmsAttachment = mms.attachment,
+                subscriptionId = mms.subscriptionId,
             )
             val existing = threads[threadId]
             val address = mms.address.ifBlank { existing?.address ?: "Unknown sender" }
@@ -771,6 +804,7 @@ object SmsRepository {
         val read: Boolean,
         val messageBox: Int,
         val attachment: CarrierMmsAttachment?,
+        val subscriptionId: Int?,
     )
 
     private fun loadMmsEntries(
@@ -789,6 +823,7 @@ object SmsRepository {
                 Telephony.Mms.MESSAGE_BOX,
                 Telephony.Mms.READ,
                 Telephony.Mms.SUBJECT,
+                Telephony.Mms.SUBSCRIPTION_ID,
             )
             val selection = threadId?.let { "${Telephony.Mms.THREAD_ID} = ?" }
             val arguments = threadId?.let { arrayOf(it.toString()) }
@@ -818,6 +853,7 @@ object SmsRepository {
                 val boxIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.MESSAGE_BOX)
                 val readIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.READ)
                 val subjectIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.SUBJECT)
+                val subscriptionIndex = cursor.getColumnIndexOrThrow(Telephony.Mms.SUBSCRIPTION_ID)
                 while ((limit == null || size < limit) && cursor.moveToNext()) {
                     val id = cursor.getLong(idIndex)
                     val box = cursor.getInt(boxIndex)
@@ -841,6 +877,8 @@ object SmsRepository {
                             read = cursor.getInt(readIndex) != 0,
                             messageBox = box,
                             attachment = parts.second,
+                            subscriptionId = cursor.getInt(subscriptionIndex)
+                                .takeIf { !cursor.isNull(subscriptionIndex) && it >= 0 },
                         ),
                     )
                 }
@@ -869,6 +907,47 @@ object SmsRepository {
         }
         fallback
     }.getOrDefault("")
+
+    internal fun mmsParticipants(
+        context: Context,
+        id: Long,
+        incoming: Boolean,
+        subscriptionId: Int?,
+    ): List<String> = runCatching {
+        val ownNumbers = if (
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) ==
+            PackageManager.PERMISSION_GRANTED &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_NUMBERS) ==
+            PackageManager.PERMISSION_GRANTED
+        ) {
+            context.getSystemService(SubscriptionManager::class.java)
+                .activeSubscriptionInfoList.orEmpty()
+                .filter { subscriptionId == null || subscriptionId < 0 || it.subscriptionId == subscriptionId }
+                .mapNotNull { it.number?.takeIf(String::isNotBlank) }
+        } else {
+            emptyList()
+        }
+        val values = mutableListOf<String>()
+        context.contentResolver.query(
+            Uri.parse("content://mms/$id/addr"),
+            arrayOf("address", "type"),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val addressIndex = cursor.getColumnIndexOrThrow("address")
+            val typeIndex = cursor.getColumnIndexOrThrow("type")
+            while (cursor.moveToNext()) {
+                val type = cursor.getInt(typeIndex)
+                if (type != 151 && (!incoming || type != 137)) continue
+                val value = cursor.getString(addressIndex).orEmpty().trim()
+                if (value.isBlank() || value == "insert-address-token") continue
+                if (incoming && ownNumbers.any { PhoneNumberUtils.compare(it, value) }) continue
+                if (values.none { PhoneNumberUtils.compare(it, value) }) values += value
+            }
+        }
+        values
+    }.getOrDefault(emptyList())
 
     private fun mmsParts(context: Context, id: Long): Pair<String, CarrierMmsAttachment?> {
         var text = ""
@@ -1034,12 +1113,21 @@ object SmsRepository {
         }.getOrNull()
     }
 
-    fun sendText(context: Context, address: String, body: String): Result<Uri> = runCatching {
+    fun sendText(
+        context: Context,
+        address: String,
+        body: String,
+        subscriptionId: Int? = null,
+    ): Result<Uri> = runCatching {
         check(isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
         check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
         require(address.isNotBlank()) { "A destination number is required" }
         require(body.isNotBlank()) { "The message is empty" }
 
+        val selectedSubscriptionId = subscriptionId ?: CarrierSubscriptionRepository.selected(
+            context,
+            CarrierSubscriptionRepository.conversationKey(null, listOf(address)),
+        )
         val values = ContentValues().apply {
             put(Telephony.Sms.ADDRESS, address)
             put(Telephony.Sms.BODY, body)
@@ -1048,12 +1136,13 @@ object SmsRepository {
             put(Telephony.Sms.SEEN, 1)
             put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_OUTBOX)
             put(Telephony.Sms.STATUS, Telephony.Sms.STATUS_PENDING)
+            selectedSubscriptionId?.takeIf { it >= 0 }?.let { put(Telephony.Sms.SUBSCRIPTION_ID, it) }
         }
         val messageUri = checkNotNull(
             context.contentResolver.insert(Telephony.Sms.Outbox.CONTENT_URI, values),
         ) { "Could not persist outgoing SMS" }
 
-        transmitText(context, address, body, messageUri)
+        transmitText(context, address, body, messageUri, selectedSubscriptionId)
         messageUri
     }
 
@@ -1064,19 +1153,25 @@ object SmsRepository {
         val stored = checkNotNull(
             context.contentResolver.query(
                 messageUri,
-                arrayOf(Telephony.Sms.ADDRESS, Telephony.Sms.BODY, Telephony.Sms.TYPE),
+                arrayOf(
+                    Telephony.Sms.ADDRESS,
+                    Telephony.Sms.BODY,
+                    Telephony.Sms.TYPE,
+                    Telephony.Sms.SUBSCRIPTION_ID,
+                ),
                 null,
                 null,
                 null,
             )?.use { cursor ->
-                if (!cursor.moveToFirst()) null else Triple(
+                if (!cursor.moveToFirst()) null else StoredFailedSms(
                     cursor.getString(0).orEmpty(),
                     cursor.getString(1).orEmpty(),
                     cursor.getInt(2),
+                    cursor.getInt(3).takeIf { !cursor.isNull(3) && it >= 0 },
                 )
             },
         ) { "The failed SMS no longer exists" }
-        check(stored.third == Telephony.Sms.MESSAGE_TYPE_FAILED) { "Only a failed SMS can be retried" }
+        check(stored.box == Telephony.Sms.MESSAGE_TYPE_FAILED) { "Only a failed SMS can be retried" }
         updateSmsProviderState(
             context,
             messageUri,
@@ -1084,11 +1179,24 @@ object SmsRepository {
             Telephony.Sms.STATUS_PENDING,
         )
         clearFailure(context, messageUri)
-        transmitText(context, stored.first, stored.second, messageUri)
+        transmitText(context, stored.address, stored.body, messageUri, stored.subscriptionId)
     }
 
-    private fun transmitText(context: Context, address: String, body: String, messageUri: Uri) {
-        val smsManager = smsManager(context)
+    private data class StoredFailedSms(
+        val address: String,
+        val body: String,
+        val box: Int,
+        val subscriptionId: Int?,
+    )
+
+    private fun transmitText(
+        context: Context,
+        address: String,
+        body: String,
+        messageUri: Uri,
+        subscriptionId: Int?,
+    ) {
+        val smsManager = smsManager(context, subscriptionId)
         val parts = smsManager.divideMessage(body)
         val sentIntents = ArrayList<PendingIntent>(parts.size)
         val deliveredIntents = ArrayList<PendingIntent>(parts.size)
@@ -1144,12 +1252,20 @@ object SmsRepository {
     }
 
     @Suppress("DEPRECATION")
-    private fun smsManager(context: Context): SmsManager = if (Build.VERSION.SDK_INT >= 31) {
-        checkNotNull(context.getSystemService(SmsManager::class.java)) {
+    private fun smsManager(context: Context, subscriptionId: Int? = null): SmsManager {
+        val base = if (Build.VERSION.SDK_INT >= 31) {
+            checkNotNull(context.getSystemService(SmsManager::class.java)) {
             "SMS service is unavailable"
+            }
+        } else {
+            SmsManager.getDefault()
         }
-    } else {
-        SmsManager.getDefault()
+        val id = subscriptionId?.takeIf { it >= 0 } ?: return base
+        return if (Build.VERSION.SDK_INT >= 31) {
+            base.createForSubscriptionId(id)
+        } else {
+            SmsManager.getSmsManagerForSubscriptionId(id)
+        }
     }
 
     private fun statusIntent(

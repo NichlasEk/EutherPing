@@ -35,6 +35,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -147,6 +148,8 @@ import se.apothictech.eutherping.secure.BluetoothAttachmentTransport
 import se.apothictech.eutherping.secure.SecureRepository
 import se.apothictech.eutherping.sms.CarrierMmsAttachment
 import se.apothictech.eutherping.sms.CarrierMmsRepository
+import se.apothictech.eutherping.sms.CarrierSubscription
+import se.apothictech.eutherping.sms.CarrierSubscriptionRepository
 import se.apothictech.eutherping.sms.CachedConversation
 import se.apothictech.eutherping.sms.CachedConversationIndex
 import se.apothictech.eutherping.sms.ConversationIndexCache
@@ -226,6 +229,7 @@ private data class Conversation(
     val pinned: Boolean = false,
     val archived: Boolean = false,
     val blocked: Boolean = false,
+    val recipients: List<String> = smsAddress?.let(::listOf).orEmpty(),
 )
 
 private data class DemoMessage(
@@ -239,6 +243,7 @@ private data class DemoMessage(
     val wireBody: String = text,
     val isMms: Boolean = false,
     val deliveryState: MessageDeliveryState? = null,
+    val subscriptionId: Int? = null,
 )
 
 private sealed interface ImageActionTarget {
@@ -319,6 +324,13 @@ private object ConversationPageMemoryCache {
 
 private fun applyContactNames(history: DeckHistory, contacts: List<PhoneContact>): DeckHistory {
     fun label(conversation: Conversation): Conversation {
+        if (conversation.recipients.size > 1) {
+            val names = conversation.recipients.map { address ->
+                ContactRepository.displayName(contacts, address) ?: address
+            }
+            val label = names.joinToString(", ")
+            return conversation.copy(name = label, initials = names.take(2).joinToString("") { nameInitials(it).take(1) })
+        }
         val address = conversation.smsAddress ?: return conversation
         val name = ContactRepository.displayName(contacts, address) ?: return conversation
         return conversation.copy(name = name, initials = nameInitials(name))
@@ -340,6 +352,7 @@ private fun Conversation.cached() = CachedConversation(
     distance = distance,
     smsAddress = smsAddress.orEmpty(),
     threadId = threadId,
+    recipients = recipients,
 )
 
 private fun CachedConversation.live(): Conversation? {
@@ -356,6 +369,7 @@ private fun CachedConversation.live(): Conversation? {
         distance = distance,
         smsAddress = smsAddress,
         threadId = threadId,
+        recipients = recipients,
     )
 }
 
@@ -387,9 +401,11 @@ private fun buildDeckHistory(
                 time = formatMessageTime(latest.timestamp),
                 transport = Transport.SMS,
                 unread = entry.ordinaryUnread,
-                distance = "ANDROID TELEPHONY",
+                distance = CarrierSubscriptionRepository.label(context, latest.subscriptionId)
+                    ?: "ANDROID TELEPHONY",
                 smsAddress = entry.address,
                 threadId = entry.threadId,
+                recipients = entry.participants,
             )
         }
         val peer = SecureRepository.peer(context, entry.address)
@@ -540,6 +556,7 @@ private fun EutherPingApp(
     var biometricAttempt by remember { mutableIntStateOf(0) }
     var biometricError by remember { mutableStateOf<String?>(null) }
     var setupRevision by remember { mutableIntStateOf(0) }
+    var carrierPermissionRequested by rememberSaveable { mutableStateOf(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, biometricGateEnabled) {
         val observer = LifecycleEventObserver { _, event ->
@@ -575,10 +592,14 @@ private fun EutherPingApp(
         resumeRevision = setupRevision,
     )
 
-    LaunchedEffect(isDefaultSmsApp, hasSmsPermissions) {
+    LaunchedEffect(isDefaultSmsApp, hasSmsPermissions, setupRevision) {
         if (isDefaultSmsApp && !hasSmsPermissions) {
             permissionsLauncher.launch(SmsRepository.requiredPermissions)
         } else if (isDefaultSmsApp && hasSmsPermissions) {
+            if (!carrierPermissionRequested && !SmsRepository.hasCarrierIdentityPermissions(context)) {
+                carrierPermissionRequested = true
+                permissionsLauncher.launch(SmsRepository.carrierIdentityPermissions)
+            }
             withContext(Dispatchers.IO) { CarrierMmsRepository.recoverPendingDownloads(context) }
         }
     }
@@ -1396,9 +1417,9 @@ private fun SignalsScreen(
     if (showNewSignal) {
         NewSmsDialog(
             onDismiss = { showNewSignal = false },
-            onOpen = { address ->
+            onOpen = { recipients ->
                 showNewSignal = false
-                onOpenConversation(cellConversation(address, null))
+                onOpenConversation(cellConversation(recipients, null))
             },
         )
     }
@@ -1513,8 +1534,14 @@ private fun NewCellSignalButton(onClick: () -> Unit) {
 }
 
 @Composable
-private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
+private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (List<String>) -> Unit) {
     var address by rememberSaveable { mutableStateOf("") }
+    val recipients = remember(address) {
+        address.split(Regex("[,;\\n]+"))
+            .map(String::trim)
+            .filter(String::isNotBlank)
+            .distinct()
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = Deep,
@@ -1524,9 +1551,16 @@ private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
         text = {
             OutlinedTextField(
                 value = address,
-                onValueChange = { address = it.filter { character -> character.isDigit() || character in "+*# " } },
-                label = { Text("Phone number") },
-                singleLine = true,
+                onValueChange = {
+                    address = it.filter { character ->
+                        character.isDigit() || character in "+*# ,;\n"
+                    }
+                },
+                label = { Text("Phone number(s), comma separated") },
+                supportingText = {
+                    if (recipients.size > 1) Text("${recipients.size} recipients // group MMS")
+                },
+                singleLine = false,
                 keyboardOptions = KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Phone),
                 colors = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = Amber,
@@ -1537,7 +1571,7 @@ private fun NewSmsDialog(onDismiss: () -> Unit, onOpen: (String) -> Unit) {
             )
         },
         confirmButton = {
-            TextButton(onClick = { onOpen(address.trim()) }, enabled = address.isNotBlank()) {
+            TextButton(onClick = { onOpen(recipients) }, enabled = recipients.isNotEmpty()) {
                 Text("OPEN CHANNEL", color = Amber, fontFamily = FontFamily.Monospace)
             }
         },
@@ -1720,14 +1754,20 @@ private fun ConversationRow(
         }
         }
         DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
-            listOf(
-                (if (conversation.pinned) "Unpin" else "Pin") to ConversationControlAction.TOGGLE_PIN,
-                (if (conversation.archived) "Unarchive" else "Archive") to ConversationControlAction.TOGGLE_ARCHIVE,
-                (if (conversation.unread > 0) "Mark as read" else "Mark as unread") to
-                    ConversationControlAction.TOGGLE_READ,
-                (if (conversation.blocked) "Unblock number" else "Block number") to
-                    ConversationControlAction.TOGGLE_BLOCK,
-            ).forEach { (label, action) ->
+            buildList {
+                add((if (conversation.pinned) "Unpin" else "Pin") to ConversationControlAction.TOGGLE_PIN)
+                add((if (conversation.archived) "Unarchive" else "Archive") to ConversationControlAction.TOGGLE_ARCHIVE)
+                add(
+                    (if (conversation.unread > 0) "Mark as read" else "Mark as unread") to
+                        ConversationControlAction.TOGGLE_READ,
+                )
+                if (conversation.recipients.size <= 1) {
+                    add(
+                        (if (conversation.blocked) "Unblock number" else "Block number") to
+                            ConversationControlAction.TOGGLE_BLOCK,
+                    )
+                }
+            }.forEach { (label, action) ->
                 DropdownMenuItem(
                     text = { Text(label) },
                     onClick = {
@@ -1771,6 +1811,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         )
     }
     val isRealSms = conversation.smsAddress != null
+    var resolvedThreadId by remember(conversation.id) { mutableStateOf(conversation.threadId) }
     val secureLane = conversation.transport == Transport.SECURE
     val securePeer = remember(conversation.smsAddress, smsRevision, secureRevision) {
         if (isRealSms && secureLane) {
@@ -1808,7 +1849,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
     val realMessagePage by produceState(
         initialValue = LoadedConversationMessages(),
-        conversation.threadId,
+        resolvedThreadId,
         conversation.smsAddress,
         smsRevision,
         secureRevision,
@@ -1818,7 +1859,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         messagePageLoading = true
         val requestedLimit = messageLimit
         val cacheKey = ConversationPageCacheKey(
-            threadId = conversation.threadId,
+            threadId = resolvedThreadId,
             address = conversation.smsAddress.orEmpty(),
             secureLane = secureLane,
             smsRevision = smsRevision,
@@ -1845,7 +1886,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 val startedAt = SystemClock.elapsedRealtime()
                 SmsRepository.loadMessagePage(
                     context = context,
-                    threadId = conversation.threadId,
+                    threadId = resolvedThreadId,
                     address = conversation.smsAddress.orEmpty(),
                     limit = requestedLimit,
                     secureLane = secureLane,
@@ -1874,6 +1915,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                 wireBody = message.body,
                                 isMms = message.isMms,
                                 deliveryState = message.deliveryState(),
+                                subscriptionId = message.subscriptionId,
                             )
                         },
                     ).also {
@@ -1932,6 +1974,50 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         }
     } else {
         demoMessages
+    }
+    val carrierRecipients = remember(conversation.id, conversation.recipients) {
+        conversation.recipients.ifEmpty { listOfNotNull(conversation.smsAddress) }
+    }
+    val carrierConversationKey = remember(conversation.id, resolvedThreadId, carrierRecipients) {
+        CarrierSubscriptionRepository.conversationKey(resolvedThreadId, carrierRecipients)
+    }
+    val carrierPermissionReady = SmsRepository.hasCarrierIdentityPermissions(context)
+    val carrierSubscriptions = remember(conversation.id, smsRevision, carrierPermissionReady) {
+        CarrierSubscriptionRepository.active(context)
+    }
+    var selectedSubscriptionId by rememberSaveable(conversation.id) {
+        mutableStateOf(CarrierSubscriptionRepository.selected(context, carrierConversationKey))
+    }
+    LaunchedEffect(messages, carrierSubscriptions, carrierConversationKey) {
+        if (selectedSubscriptionId != null && carrierSubscriptions.isNotEmpty() &&
+            carrierSubscriptions.none { it.id == selectedSubscriptionId }
+        ) {
+            selectedSubscriptionId = null
+        }
+        if (selectedSubscriptionId == null) {
+            selectedSubscriptionId = CarrierSubscriptionRepository.selected(
+                context,
+                carrierConversationKey,
+                messages.lastOrNull()?.subscriptionId,
+            )
+        } else {
+            CarrierSubscriptionRepository.remember(
+                context,
+                carrierConversationKey,
+                checkNotNull(selectedSubscriptionId),
+            )
+        }
+    }
+    fun selectSubscription(subscriptionId: Int) {
+        selectedSubscriptionId = subscriptionId
+        CarrierSubscriptionRepository.remember(context, carrierConversationKey, subscriptionId)
+        carrierRecipients.forEach { recipient ->
+            CarrierSubscriptionRepository.remember(
+                context,
+                CarrierSubscriptionRepository.conversationKey(null, listOf(recipient)),
+                subscriptionId,
+            )
+        }
     }
     val displayedMessages = remember(messages, conversationSearchQuery) {
         val query = conversationSearchQuery.trim()
@@ -1999,6 +2085,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                 context,
                                 conversation.smsAddress.orEmpty(),
                                 prepared.wireBody,
+                                selectedSubscriptionId,
                             ).map {
                                 "Encrypted attachment offered over ${prepared.descriptor.transportLabel.lowercase()}"
                             }
@@ -2032,12 +2119,16 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         }
     }
 
-    LaunchedEffect(conversation.threadId) {
-        if (isRealSms) SmsRepository.markThreadRead(context, conversation.threadId)
+    LaunchedEffect(resolvedThreadId) {
+        if (isRealSms) SmsRepository.markThreadRead(context, resolvedThreadId)
     }
 
     fun sendMessage() {
         if (attachmentBusy) return
+        if (!secureLane && carrierSubscriptions.size > 1 && selectedSubscriptionId == null) {
+            Toast.makeText(context, "Select a SIM before sending", Toast.LENGTH_SHORT).show()
+            return
+        }
         val text = draft.trim()
         val carrierMmsUri = pendingCarrierMmsUri
         if (!secureLane && isRealSms && carrierMmsUri != null) {
@@ -2047,9 +2138,10 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     withContext(Dispatchers.IO) {
                         CarrierMmsRepository.sendImage(
                             context,
-                            conversation.smsAddress.orEmpty(),
+                            carrierRecipients,
                             text,
                             carrierMmsUri,
+                            selectedSubscriptionId,
                         )
                     }
                 } catch (error: Throwable) {
@@ -2057,7 +2149,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 } finally {
                     attachmentBusy = false
                 }
-                result.onSuccess {
+                result.onSuccess { messageUri ->
+                    resolvedThreadId = SmsRepository.threadIdForMessage(context, messageUri) ?: resolvedThreadId
                     clearStoredDraft()
                     draft = ""
                     pendingCarrierMmsUri = null
@@ -2081,7 +2174,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             }
         } else if (text.isNotEmpty()) {
             if (isRealSms) {
-                val automaticTextMms = !secureLane && SmsRepository.smsPartCount(context, text) > 1
+                val automaticTextMms = !secureLane &&
+                    (carrierRecipients.size > 1 || SmsRepository.smsPartCount(context, text) > 1)
                 val outgoing = if (secureLane) {
                     SecureRepository.encryptMessage(context, conversation.smsAddress.orEmpty(), text)
                 } else {
@@ -2089,12 +2183,23 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 }
                 outgoing.flatMap { wireBody ->
                     if (automaticTextMms) {
-                        CarrierMmsRepository.sendText(context, conversation.smsAddress.orEmpty(), wireBody)
+                        CarrierMmsRepository.sendText(
+                            context,
+                            carrierRecipients,
+                            wireBody,
+                            selectedSubscriptionId,
+                        )
                     } else {
-                        SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), wireBody)
+                        SmsRepository.sendText(
+                            context,
+                            conversation.smsAddress.orEmpty(),
+                            wireBody,
+                            selectedSubscriptionId,
+                        )
                     }
                 }
-                    .onSuccess {
+                    .onSuccess { messageUri ->
+                        resolvedThreadId = SmsRepository.threadIdForMessage(context, messageUri) ?: resolvedThreadId
                         clearStoredDraft()
                         draft = ""
                         focusManager.clearFocus()
@@ -2102,6 +2207,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                             context,
                             if (secureLane) {
                                 "Encrypted Secure Ping queued"
+                            } else if (carrierRecipients.size > 1) {
+                                "Group MMS queued for ${carrierRecipients.size} recipients"
                             } else if (automaticTextMms) {
                                 "Long message queued as MMS"
                             } else {
@@ -2160,6 +2267,10 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 attachmentBusy = attachmentBusy,
                 attachmentEnabled = isRealSms,
                 carrierMmsUri = pendingCarrierMmsUri.takeUnless { secureLane },
+                carrierSubscriptions = carrierSubscriptions,
+                selectedSubscriptionId = selectedSubscriptionId,
+                onSelectSubscription = ::selectSubscription,
+                groupRecipientCount = carrierRecipients.size,
                 onRemoveCarrierMms = {
                     pendingCarrierMmsUri?.let { uri ->
                         runCatching {
@@ -2475,7 +2586,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 TextButton(
                     onClick = {
                         showDeleteConversation = false
-                        val threadId = conversation.threadId ?: return@TextButton
+                        val threadId = resolvedThreadId ?: return@TextButton
                         coroutineScope.launch {
                             val result = withContext(Dispatchers.IO) {
                                 SmsRepository.deleteThread(context, threadId)
@@ -2648,6 +2759,8 @@ private fun ConversationHeader(
                         SecurePeerState.INVITE_SENT -> "SECURE INVITATION IN TRANSIT"
                         else -> if (conversation.transport == Transport.SECURE) {
                             "VESSEL NOT PAIRED"
+                        } else if (conversation.recipients.size > 1) {
+                            "GROUP MMS // ${conversation.recipients.size} PARTICIPANTS // REPLY ALL"
                         } else {
                             "CELLULAR CONTACT"
                         }
@@ -2666,9 +2779,9 @@ private fun ConversationHeader(
             }
             DropdownMenu(expanded = menuExpanded, onDismissRequest = { menuExpanded = false }) {
                 DropdownMenuItem(
-                    text = { Text("Copy address") },
+                    text = { Text(if (conversation.recipients.size > 1) "Copy participants" else "Copy address") },
                     onClick = {
-                        clipboard.setText(AnnotatedString(conversation.smsAddress.orEmpty()))
+                        clipboard.setText(AnnotatedString(conversation.recipients.joinToString(", ")))
                         menuExpanded = false
                     },
                 )
@@ -2709,6 +2822,9 @@ private fun MessageBubble(
     onAttachment: (SecureAttachmentDescriptor) -> Unit,
 ) {
     val context = LocalContext.current
+    val simLabel = remember(message.subscriptionId) {
+        CarrierSubscriptionRepository.label(context, message.subscriptionId)
+    }
     val lightTheme = LocalLightTheme.current
     val accent = if (message.outgoing) {
         if (message.transport == Transport.SECURE) Violet else Amber
@@ -2920,6 +3036,7 @@ private fun MessageBubble(
                                 else -> " // CELL"
                             },
                         )
+                        simLabel?.let { append(" // ").append(it) }
                     },
                     color = accent.copy(alpha = 0.75f),
                     fontFamily = FontFamily.Monospace,
@@ -3279,6 +3396,10 @@ private fun Composer(
     attachmentBusy: Boolean,
     attachmentEnabled: Boolean,
     carrierMmsUri: Uri?,
+    carrierSubscriptions: List<CarrierSubscription>,
+    selectedSubscriptionId: Int?,
+    onSelectSubscription: (Int) -> Unit,
+    groupRecipientCount: Int,
     onRemoveCarrierMms: () -> Unit,
     onAttachment: () -> Unit,
     onSend: () -> Unit,
@@ -3329,14 +3450,46 @@ private fun Composer(
             )
         }
         AnimatedVisibility(visible = transport == Transport.SMS) {
-            Text(
-                "Carrier charges may apply. Secure messages never fall back silently.",
-                color = Amber.copy(alpha = 0.84f),
-                fontFamily = FontFamily.Monospace,
-                fontSize = 11.sp,
-                lineHeight = 17.sp,
-                modifier = Modifier.padding(bottom = 6.dp),
-            )
+            Column(modifier = Modifier.padding(bottom = 6.dp)) {
+                Text(
+                    if (groupRecipientCount > 1) {
+                        "GROUP MMS // $groupRecipientCount recipients // reply all"
+                    } else {
+                        "Carrier charges may apply. Secure messages never fall back silently."
+                    },
+                    color = Amber.copy(alpha = 0.84f),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    lineHeight = 17.sp,
+                )
+                if (carrierSubscriptions.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
+                            .horizontalScroll(rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(7.dp),
+                    ) {
+                        carrierSubscriptions.forEach { subscription ->
+                            StatusChip(
+                                text = subscription.label,
+                                color = Amber,
+                                selected = selectedSubscriptionId == subscription.id,
+                                modifier = Modifier.clickable(enabled = enabled && !attachmentBusy) {
+                                    onSelectSubscription(subscription.id)
+                                },
+                            )
+                        }
+                    }
+                    if (carrierSubscriptions.size > 1 && selectedSubscriptionId == null) {
+                        Text(
+                            "SELECT A SIM BEFORE SENDING",
+                            color = Amber,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 9.sp,
+                            modifier = Modifier.padding(top = 5.dp),
+                        )
+                    }
+                }
+            }
         }
         carrierMmsPreview?.let { bitmap ->
             Column(modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp)) {
@@ -3412,7 +3565,8 @@ private fun Composer(
                     cursorColor = accent,
                 ),
             )
-            val canSend = draft.isNotBlank() || carrierMmsPreview != null
+            val simReady = carrierSubscriptions.size <= 1 || selectedSubscriptionId != null
+            val canSend = (draft.isNotBlank() || carrierMmsPreview != null) && simReady
             IconButton(onClick = onSend, enabled = enabled && !attachmentBusy && canSend) {
                 Icon(
                     Icons.AutoMirrored.Filled.Send,
@@ -4077,7 +4231,16 @@ private fun cellConversation(
     address: String,
     threadId: Long?,
     contactName: String? = null,
-): Conversation = Conversation(
+): Conversation = cellConversation(listOf(address), threadId, contactName)
+
+private fun cellConversation(
+    recipients: List<String>,
+    threadId: Long?,
+    contactName: String? = null,
+): Conversation {
+    val destinations = recipients.map(String::trim).filter(String::isNotBlank).distinct()
+    val address = destinations.joinToString(", ")
+    return Conversation(
     id = threadId?.let { (100_000L + it).toInt() } ?: address.hashCode(),
     name = contactName ?: address,
     initials = contactName?.let(::nameInitials) ?: addressInitials(address),
@@ -4087,7 +4250,9 @@ private fun cellConversation(
     distance = "ANDROID TELEPHONY",
     smsAddress = address,
     threadId = threadId,
+    recipients = destinations,
 )
+}
 
 private fun secureConversation(
     address: String,

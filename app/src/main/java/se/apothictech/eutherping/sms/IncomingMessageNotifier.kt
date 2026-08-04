@@ -22,6 +22,8 @@ import se.apothictech.eutherping.contacts.ContactRepository
 object IncomingMessageNotifier {
     internal const val CHANNEL_ID = "incoming_sms"
     internal const val EXTRA_THREAD_ID = "thread_id"
+    internal const val EXTRA_RECIPIENTS = "recipients"
+    internal const val EXTRA_SUBSCRIPTION_ID = "subscription_id"
 
     fun show(
         context: Context,
@@ -30,6 +32,8 @@ object IncomingMessageNotifier {
         secureLane: Boolean,
         threadId: Long? = null,
         displayName: String? = ContactRepository.displayName(context, address),
+        recipients: List<String> = listOf(address),
+        subscriptionId: Int? = null,
     ) {
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -98,6 +102,8 @@ object IncomingMessageNotifier {
             val replyIntent = Intent(context, NotificationReplyReceiver::class.java).apply {
                 action = NotificationReplyReceiver.ACTION_REPLY
                 putExtra(NotificationReplyReceiver.EXTRA_ADDRESS, address)
+                putExtra(EXTRA_RECIPIENTS, recipients.toTypedArray())
+                subscriptionId?.let { putExtra(EXTRA_SUBSCRIPTION_ID, it) }
                 putExtra(EXTRA_THREAD_ID, threadId ?: -1L)
                 putExtra(NotificationReplyReceiver.EXTRA_NOTIFICATION_ID, address.hashCode())
             }

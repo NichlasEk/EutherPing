@@ -12,6 +12,8 @@ class NotificationReplyReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != ACTION_REPLY) return
         val address = intent.getStringExtra(EXTRA_ADDRESS).orEmpty()
+        val recipients = intent.getStringArrayExtra(IncomingMessageNotifier.EXTRA_RECIPIENTS)
+            ?.map(String::trim)?.filter(String::isNotBlank).orEmpty().ifEmpty { listOf(address) }
         val reply = RemoteInput.getResultsFromIntent(intent)
             ?.getCharSequence(REMOTE_INPUT_KEY)
             ?.toString()
@@ -23,12 +25,22 @@ class NotificationReplyReceiver : BroadcastReceiver() {
         val appContext = context.applicationContext
         val threadId = intent.getLongExtra(IncomingMessageNotifier.EXTRA_THREAD_ID, -1L).takeIf { it > 0 }
         val notificationId = intent.getIntExtra(EXTRA_NOTIFICATION_ID, address.hashCode())
+        val observedSubscriptionId = intent.getIntExtra(
+            IncomingMessageNotifier.EXTRA_SUBSCRIPTION_ID,
+            -1,
+        ).takeIf { it >= 0 }
         thread(name = "EutherPing-notification-reply") {
             try {
-                val result = if (SmsRepository.smsPartCount(appContext, reply) > 1) {
-                    CarrierMmsRepository.sendText(appContext, address, reply)
+                val conversationKey = CarrierSubscriptionRepository.conversationKey(threadId, recipients)
+                val subscriptionId = CarrierSubscriptionRepository.selected(
+                    appContext,
+                    conversationKey,
+                    observedSubscriptionId,
+                )
+                val result = if (recipients.size > 1 || SmsRepository.smsPartCount(appContext, reply) > 1) {
+                    CarrierMmsRepository.sendText(appContext, recipients, reply, subscriptionId)
                 } else {
-                    SmsRepository.sendText(appContext, address, reply)
+                    SmsRepository.sendText(appContext, address, reply, subscriptionId)
                 }
                 result.getOrThrow()
                 SmsRepository.markThreadRead(appContext, threadId)

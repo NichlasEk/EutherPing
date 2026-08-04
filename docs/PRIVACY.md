@@ -56,6 +56,12 @@ and service endpoints are excluded. A report leaves app-private storage only
 when the user explicitly chooses Export in System and selects a destination
 through Android's document picker.
 
+On phones with more than one active subscription, EutherPing asks Android for
+phone-state and phone-number access solely to label available SIMs and exclude
+the device's own line from an incoming group-MMS participant list. The selected
+subscription ID is remembered locally per conversation. SIM metadata and phone
+numbers are never added to diagnostics or uploaded by EutherPing.
+
 ## Security and limitations
 
 Secure Ping is labelled beta. It uses established cryptographic primitives, but it does not yet provide Double Ratchet forward secrecy, post-compromise security, secure backups, or group encryption. Users should compare the safety code on both devices in person or through another trusted channel before verifying a Vessel.

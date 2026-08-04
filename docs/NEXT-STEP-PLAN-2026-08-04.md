@@ -134,3 +134,10 @@ as complete.
   bounded, manually exported, and exclude message content and identifiers. The
   Samsung and GrapheneOS before/after comparison remains a physical-device
   acceptance step and is not claimed complete by the automated test gate.
+- `0.8.4`: phase 5 implementation checkpoint — active SIMs are explicit in the
+  composer, remembered per participant-based thread, preserved through retry,
+  and shown on messages when Android supplies a subscription ID. New and
+  incoming group MMS retain their complete participant set and reply-all stays
+  in the same Android thread. Emulator provider tests cover group identity; the
+  documented Samsung/GrapheneOS carrier, roaming, Wi-Fi-calling and
+  mobile-data-off matrix remains the physical acceptance gate.

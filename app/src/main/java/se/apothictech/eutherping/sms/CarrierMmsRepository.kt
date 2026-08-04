@@ -141,15 +141,25 @@ object CarrierMmsRepository {
         address: String,
         caption: String,
         source: Uri,
+        subscriptionId: Int? = null,
+    ): Result<Uri> = sendImage(context, listOf(address), caption, source, subscriptionId)
+
+    fun sendImage(
+        context: Context,
+        recipients: List<String>,
+        caption: String,
+        source: Uri,
+        subscriptionId: Int? = null,
     ): Result<Uri> = runCatching {
         check(SmsRepository.isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
         check(SmsRepository.hasSmsPermissions(context)) { "SMS permissions are not granted" }
-        require(address.isNotBlank()) { "A destination number is required" }
+        val destinations = recipients.map(String::trim).filter(String::isNotBlank).distinct()
+        require(destinations.isNotEmpty()) { "At least one destination number is required" }
         require(context.contentResolver.getType(source)?.startsWith("image/") == true) {
             "Carrier MMS currently supports images"
         }
 
-        val manager = smsManager(context)
+        val manager = smsManager(context, subscriptionId)
         val captionBytes = caption.trim().toByteArray(Charsets.UTF_8)
         val payloadLimit = carrierPayloadLimit(manager)
         require(captionBytes.size < payloadLimit - 8_192) { "The MMS caption is too large" }
@@ -159,7 +169,7 @@ object CarrierMmsRepository {
             payloadLimit - captionBytes.size - 8_192,
         )
         val request = SendReq().apply {
-            setTo(arrayOf(EncodedStringValue(address)))
+            setTo(destinations.map(::EncodedStringValue).toTypedArray())
             setDate(System.currentTimeMillis() / 1000L)
             setDeliveryReport(PduHeaders.VALUE_NO)
             setReadReport(PduHeaders.VALUE_NO)
@@ -179,20 +189,29 @@ object CarrierMmsRepository {
         context: Context,
         address: String,
         text: String,
+        subscriptionId: Int? = null,
+    ): Result<Uri> = sendText(context, listOf(address), text, subscriptionId)
+
+    fun sendText(
+        context: Context,
+        recipients: List<String>,
+        text: String,
+        subscriptionId: Int? = null,
     ): Result<Uri> = runCatching {
         check(SmsRepository.isDefaultSmsApp(context)) { "EutherPing is not the default SMS app" }
         check(SmsRepository.hasSmsPermissions(context)) { "SMS permissions are not granted" }
-        require(address.isNotBlank()) { "A destination number is required" }
+        val destinations = recipients.map(String::trim).filter(String::isNotBlank).distinct()
+        require(destinations.isNotEmpty()) { "At least one destination number is required" }
         val normalizedText = text.trim()
         require(normalizedText.isNotBlank()) { "The message is empty" }
 
-        val manager = smsManager(context)
+        val manager = smsManager(context, subscriptionId)
         val textBytes = normalizedText.toByteArray(Charsets.UTF_8)
         require(textBytes.size < carrierPayloadLimit(manager) - 8_192) {
             "The text is too large for this carrier's MMS limit"
         }
         val request = SendReq().apply {
-            setTo(arrayOf(EncodedStringValue(address)))
+            setTo(destinations.map(::EncodedStringValue).toTypedArray())
             setDate(System.currentTimeMillis() / 1000L)
             setDeliveryReport(PduHeaders.VALUE_NO)
             setReadReport(PduHeaders.VALUE_NO)
@@ -225,13 +244,18 @@ object CarrierMmsRepository {
         val messageUri = Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, providerId.toString())
         val request = PduPersister.getPduPersister(context).load(messageUri) as? SendReq
             ?: error("The failed carrier MMS can no longer be reconstructed")
+        var storedSubscriptionId: Int? = null
         val currentBox = context.contentResolver.query(
             messageUri,
-            arrayOf(Telephony.Mms.MESSAGE_BOX),
+            arrayOf(Telephony.Mms.MESSAGE_BOX, Telephony.Mms.SUBSCRIPTION_ID),
             null,
             null,
             null,
-        )?.use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else null }
+        )?.use { cursor ->
+            if (!cursor.moveToFirst()) null else cursor.getInt(0).also {
+                storedSubscriptionId = cursor.getInt(1).takeIf { !cursor.isNull(1) && it >= 0 }
+            }
+        }
         check(currentBox == Telephony.Mms.MESSAGE_BOX_FAILED) { "Only a failed carrier MMS can be retried" }
         context.contentResolver.update(
             messageUri,
@@ -240,7 +264,7 @@ object CarrierMmsRepository {
             null,
         )
         SmsRepository.clearCarrierFailure(context, messageUri)
-        transmitPersistedRequest(context, smsManager(context), request, messageUri)
+        transmitPersistedRequest(context, smsManager(context, storedSubscriptionId), request, messageUri)
         context.sendBroadcast(Intent(SmsRepository.ACTION_SMS_CHANGED).setPackage(context.packageName))
         messageUri
     }
@@ -376,12 +400,23 @@ object CarrierMmsRepository {
                 ?.trim()
                 .orEmpty()
                 .ifBlank { "Unknown sender" }
+            val providerId = messageUri.lastPathSegment?.toLongOrNull()
+            val participants = providerId?.let {
+                SmsRepository.mmsParticipants(
+                    context,
+                    it,
+                    incoming = true,
+                    subscriptionId = subscriptionId,
+                )
+            }.orEmpty().ifEmpty { listOf(address) }
             IncomingMessageNotifier.show(
                 context = context,
                 address = address,
                 body = "Carrier MMS received",
                 secureLane = false,
                 threadId = SmsRepository.threadIdForMessage(context, messageUri),
+                recipients = participants,
+                subscriptionId = subscriptionId,
             )
         }
         messageUri

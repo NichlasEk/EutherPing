@@ -17,6 +17,7 @@ data class CachedConversation(
     val distance: String,
     val smsAddress: String,
     val threadId: Long?,
+    val recipients: List<String> = listOf(smsAddress),
 )
 
 data class CachedConversationIndex(
@@ -26,8 +27,8 @@ data class CachedConversationIndex(
 )
 
 object ConversationIndexCache {
-    private const val SCHEMA = 1
-    private const val FILE_NAME = "conversation-index-v1.json"
+    private const val SCHEMA = 2
+    private const val FILE_NAME = "conversation-index-v2.json"
     private const val SECURE_PLACEHOLDER = "Encrypted Secure Ping // syncing…"
 
     fun load(context: Context): CachedConversationIndex? = runCatching {
@@ -74,6 +75,7 @@ object ConversationIndexCache {
         .put("distance", distance)
         .put("smsAddress", smsAddress)
         .put("threadId", threadId ?: JSONObject.NULL)
+        .put("recipients", JSONArray(recipients))
 
     private fun JSONArray.conversations() = buildList {
         repeat(length()) { index ->
@@ -90,6 +92,9 @@ object ConversationIndexCache {
                     distance = item.getString("distance"),
                     smsAddress = item.getString("smsAddress"),
                     threadId = if (item.isNull("threadId")) null else item.getLong("threadId"),
+                    recipients = item.optJSONArray("recipients")?.let { array ->
+                        buildList { repeat(array.length()) { add(array.getString(it)) } }
+                    }.orEmpty().ifEmpty { listOf(item.getString("smsAddress")) },
                 ),
             )
         }

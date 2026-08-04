@@ -24,6 +24,7 @@ class ConversationIndexCacheTest {
         val restored = ConversationIndexCache.load(context)
         assertNotNull(restored)
         assertEquals("ordinary preview", restored!!.signals.single().preview)
+        assertEquals(listOf("0700000000", "0700000001"), restored.signals.single().recipients)
         assertFalse(restored.vessels.single().preview.contains("secret plaintext"))
         assertEquals(1234L, restored.updatedAt)
         ConversationIndexCache.clear(context)
@@ -40,5 +41,6 @@ class ConversationIndexCacheTest {
         distance = "ANDROID TELEPHONY",
         smsAddress = "0700000000",
         threadId = 7L,
+        recipients = listOf("0700000000", "0700000001"),
     )
 }
