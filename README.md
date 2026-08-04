@@ -7,6 +7,8 @@ message text, attachment names, keys, phone numbers, or ciphertext. Exact
 duplicates are ignored without another notification; signed frames older than
 30 days or more than 24 hours in the future fail closed. Pairing control capsules
 remain outside this first authenticated-frame replay slice.
+The reviewed ratcheting-protocol selection and its license gate are documented
+in [`docs/SECURE_PROTOCOL_MIGRATION.md`](docs/SECURE_PROTOCOL_MIGRATION.md).
 
 Version 0.8.5 hardens Secure Vessels storage. Encrypted attachment payloads stay
 in a dedicated private app directory and are no longer decrypted merely because

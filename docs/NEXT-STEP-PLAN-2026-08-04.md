@@ -109,6 +109,15 @@ changed; group replies cannot accidentally become separate one-to-one threads.
 Acceptance: an implementation and migration design can be independently
 reviewed; legacy conversations fail safely; no silent plaintext fallback exists.
 
+Design status: [`SECURE_PROTOCOL_MIGRATION.md`](SECURE_PROTOCOL_MIGRATION.md)
+selects Signal's current `libsignal` as the leading one-to-one implementation
+and MLS as a later group candidate. Integration is intentionally blocked on an
+explicit AGPLv3/unsupported-external-API ownership decision; the repository has
+no declared license, so adding the dependency would be a material product and
+distribution decision. The design specifies EP3 coexistence, fresh verification,
+encrypted atomic state, failure/reinstall behavior, test evidence, and external
+review gates.
+
 ## Release rhythm
 
 Each phase should land as a narrow commit, pass unit/lint/debug/release checks,
