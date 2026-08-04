@@ -128,3 +128,9 @@ as complete.
   Archived rows are explicitly recoverable, and System offers sender+preview,
   sender-only, and private notification modes. Existing per-message copy,
   forward, and local-delete actions remain available inside conversations.
+- `0.8.3`: phase 4 implementation checkpoint — startup and conversation journeys
+  ship with an Android Baseline Profile; local diagnostics measure first frame,
+  provider pages, MMS preview decode/cache, and rendered-frame jank. Reports are
+  bounded, manually exported, and exclude message content and identifiers. The
+  Samsung and GrapheneOS before/after comparison remains a physical-device
+  acceptance step and is not claimed complete by the automated test gate.

@@ -1,5 +1,13 @@
 # EutherPing
 
+Version 0.8.3 adds local, privacy-safe performance diagnostics and Android
+Baseline Profiles for startup, opening the inbox and a conversation, and
+scrolling MMS history. System can export a bounded report containing timings,
+counts, dimensions, and frame-jank totals but no phone numbers, contacts,
+message text, attachment names, keys, or network endpoints. The repeatable
+physical-phone procedure is documented in
+[`docs/PERFORMANCE_TESTING.md`](docs/PERFORMANCE_TESTING.md).
+
 Version 0.8.2 completes the daily-convenience phase. Long-press a conversation
 to pin, archive, mark read/unread, or confirm Android system block/unblock;
 archived rows can always be shown again from the deck menu. Search now covers
@@ -18,7 +26,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.1`; the detailed `0.8.0` overview below describes
+The current release is `0.8.3`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:

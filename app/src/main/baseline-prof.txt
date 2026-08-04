@@ -1,0 +1,6 @@
+# Carrier MMS image rows use the same generated Compose conversation-scroll path.
+# Keep the bounded provider/part lookup and cached preview decoder compiled for
+# physical Samsung runs where the profile generator encounters real MMS media.
+HSPLse/apothictech/eutherping/sms/CarrierMmsRepository;->**(**)**
+HSPLse/apothictech/eutherping/sms/SmsRepository;->loadMms**(**)**
+HSPLse/apothictech/eutherping/sms/SmsRepository;->mms**(**)**

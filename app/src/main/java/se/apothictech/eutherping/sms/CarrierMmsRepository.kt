@@ -14,6 +14,8 @@ import android.telephony.SubscriptionManager
 import android.telephony.SmsManager
 import android.util.Log
 import android.util.LruCache
+import android.os.SystemClock
+import se.apothictech.eutherping.PerformanceDiagnostics
 import androidx.core.content.FileProvider
 import com.google.android.mms.pdu_alt.EncodedStringValue
 import com.google.android.mms.pdu_alt.NotificationInd
@@ -52,9 +54,17 @@ object CarrierMmsRepository {
         loadSourcePreview(context, attachment.uri)
 
     fun loadSourcePreview(context: Context, source: Uri): Result<Bitmap> = runCatching {
+        val startedAt = SystemClock.elapsedRealtime()
         val cacheKey = source.toString()
         synchronized(previewCache) {
-            previewCache.get(cacheKey)?.takeUnless(Bitmap::isRecycled)?.let { return@runCatching it }
+            previewCache.get(cacheKey)?.takeUnless(Bitmap::isRecycled)?.let {
+                PerformanceDiagnostics.record(
+                    context,
+                    event = "mms_preview_cache_hit",
+                    durationMs = SystemClock.elapsedRealtime() - startedAt,
+                )
+                return@runCatching it
+            }
             previewCache.remove(cacheKey)
         }
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -72,6 +82,16 @@ object CarrierMmsRepository {
                 BitmapFactory.decodeStream(it, null, BitmapFactory.Options().apply { inSampleSize = sample }),
             ) { "MMS image could not be decoded" }.also { decoded ->
                 synchronized(previewCache) { previewCache.put(cacheKey, decoded) }
+                PerformanceDiagnostics.record(
+                    context,
+                    event = "mms_preview_decode",
+                    durationMs = SystemClock.elapsedRealtime() - startedAt,
+                    values = mapOf(
+                        "width" to decoded.width.toLong(),
+                        "height" to decoded.height.toLong(),
+                        "sample" to sample.toLong(),
+                    ),
+                )
             }
         }
     }

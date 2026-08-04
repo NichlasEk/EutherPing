@@ -48,6 +48,14 @@ choice can also affect calls and other carrier-message apps. Notification
 privacy can hide the message preview, or both sender and preview; Secure Vessel
 notifications always use the private form.
 
+Performance diagnostics are written only to a bounded private on-device file
+and are never uploaded. They contain event names, timestamps, durations,
+numeric counts, image dimensions and frame-jank totals. Phone numbers, contact
+names, message contents, attachment names, cryptographic material, IP addresses
+and service endpoints are excluded. A report leaves app-private storage only
+when the user explicitly chooses Export in System and selects a destination
+through Android's document picker.
+
 ## Security and limitations
 
 Secure Ping is labelled beta. It uses established cryptographic primitives, but it does not yet provide Double Ratchet forward secrecy, post-compromise security, secure backups, or group encryption. Users should compare the safety code on both devices in person or through another trusted channel before verifying a Vessel.

@@ -2,6 +2,7 @@ plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+    id("androidx.baselineprofile")
 }
 
 android {
@@ -12,8 +13,8 @@ android {
         applicationId = "se.apothictech.eutherping"
         minSdk = 28
         targetSdk = 36
-        versionCode = 30
-        versionName = "0.8.2"
+        versionCode = 31
+        versionName = "0.8.3"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -60,6 +61,10 @@ dependencies {
         isTransitive = false
     }
     implementation("com.google.crypto.tink:tink-android:1.23.0")
+    implementation("androidx.metrics:metrics-performance:1.0.0")
+    implementation("androidx.profileinstaller:profileinstaller:1.4.1")
+
+    baselineProfile(project(":baselineprofile"))
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     androidTestImplementation("androidx.test.ext:junit:1.3.0")

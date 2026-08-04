@@ -422,8 +422,14 @@ private fun buildDeckHistory(
 class MainActivity : ComponentActivity() {
     private var requestedAddress by mutableStateOf<String?>(null)
     private var requestedSecureLane by mutableStateOf(false)
+    private var framePerformanceTracker: FramePerformanceTracker? = null
+    private var backgroundedAtElapsed = 0L
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        val createStartedAt = SystemClock.elapsedRealtime()
+        val firstActivityInProcess = synchronized(MainActivity::class.java) {
+            processFirstActivity.also { processFirstActivity = false }
+        }
         super.onCreate(savedInstanceState)
         requestedAddress = intent.smsAddress()
         requestedSecureLane = intent.getBooleanExtra(EXTRA_SECURE_LANE, false)
@@ -454,6 +460,19 @@ class MainActivity : ComponentActivity() {
                 },
             )
         }
+        framePerformanceTracker = FramePerformanceTracker(this, window)
+        window.decorView.post {
+            PerformanceDiagnostics.record(
+                this,
+                event = if (firstActivityInProcess) "cold_first_frame" else "warm_first_frame",
+                durationMs = SystemClock.elapsedRealtime() - PROCESS_STARTED_ELAPSED,
+            )
+        }
+        PerformanceDiagnostics.record(
+            this,
+            event = "activity_create",
+            durationMs = SystemClock.elapsedRealtime() - createStartedAt,
+        )
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -465,6 +484,17 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val resumeStartedAt = backgroundedAtElapsed
+        if (resumeStartedAt > 0L) {
+            backgroundedAtElapsed = 0L
+            window.decorView.post {
+                PerformanceDiagnostics.record(
+                    this,
+                    event = "warm_resume_frame",
+                    durationMs = SystemClock.elapsedRealtime() - resumeStartedAt,
+                )
+            }
+        }
         if (BluetoothAttachmentTransport.hasPermission(this)) {
             BluetoothAttachmentTransport.ensureServerStarted(this).onFailure {
                 Log.i("EutherPingAttachment", "Bluetooth attachment server is not ready", it)
@@ -472,7 +502,21 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStop() {
+        backgroundedAtElapsed = SystemClock.elapsedRealtime()
+        framePerformanceTracker?.flush()
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        framePerformanceTracker?.stop()
+        framePerformanceTracker = null
+        super.onDestroy()
+    }
+
     companion object {
+        private val PROCESS_STARTED_ELAPSED = SystemClock.elapsedRealtime()
+        private var processFirstActivity = true
         const val EXTRA_SECURE_LANE = "se.apothictech.eutherping.SECURE_LANE"
     }
 }
@@ -875,10 +919,20 @@ private fun SignalDeck(
                 SmsRepository.loadConversationIndex(context, SecureRepository::isSecureBody).fold(
                     onSuccess = {
                         buildDeckHistory(context, it).also { history ->
+                            val elapsed = SystemClock.elapsedRealtime() - startedAt
                             Log.i(
                                 "EutherPingPerf",
-                                "conversation-index loaded in ${SystemClock.elapsedRealtime() - startedAt} ms " +
+                                "conversation-index loaded in $elapsed ms " +
                                     "(${history.signals.size} signals, ${history.vessels.size} vessels)",
+                            )
+                            PerformanceDiagnostics.record(
+                                context,
+                                event = "conversation_index",
+                                durationMs = elapsed,
+                                values = mapOf(
+                                    "signals" to history.signals.size.toLong(),
+                                    "vessels" to history.vessels.size.toLong(),
+                                ),
                             )
                         }
                     },
@@ -1779,6 +1833,12 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 "EutherPingPerf",
                 "conversation memory cache hit (${cached.messages.size} visible, limit=$requestedLimit)",
             )
+            PerformanceDiagnostics.record(
+                context,
+                event = "conversation_cache_hit",
+                durationMs = 0L,
+                values = mapOf("visible" to cached.messages.size.toLong(), "limit" to requestedLimit.toLong()),
+            )
         }
         value = if (isRealSms) {
             withContext(Dispatchers.IO) {
@@ -1817,10 +1877,21 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                             )
                         },
                     ).also {
+                        val elapsed = SystemClock.elapsedRealtime() - startedAt
                         Log.i(
                             "EutherPingPerf",
-                            "conversation loaded in ${SystemClock.elapsedRealtime() - startedAt} ms " +
+                            "conversation loaded in $elapsed ms " +
                                 "(${it.messages.size} visible, limit=$requestedLimit)",
+                        )
+                        PerformanceDiagnostics.record(
+                            context,
+                            event = "conversation_page",
+                            durationMs = elapsed,
+                            values = mapOf(
+                                "visible" to it.messages.size.toLong(),
+                                "limit" to requestedLimit.toLong(),
+                                "secure" to if (secureLane) 1L else 0L,
+                            ),
                         )
                     }
                 }
@@ -3572,6 +3643,7 @@ private fun SystemScreen(
     onRequestSmsSetup: () -> Unit,
 ) {
     val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
     var notificationPrivacy by remember {
         mutableStateOf(ConversationControlsRepository.notificationPrivacy(context))
     }
@@ -3591,6 +3663,21 @@ private fun SystemScreen(
         bluetoothRevision++
         if (BluetoothAttachmentTransport.hasPermission(context)) {
             BluetoothAttachmentTransport.ensureServerStarted(context)
+        }
+    }
+    val diagnosticsExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/plain"),
+    ) { uri ->
+        if (uri != null) coroutineScope.launch {
+            withContext(Dispatchers.IO) { PerformanceDiagnostics.export(context, uri) }
+                .onSuccess { Toast.makeText(context, "Diagnostics saved", Toast.LENGTH_SHORT).show() }
+                .onFailure { error ->
+                    Toast.makeText(
+                        context,
+                        "Could not save diagnostics: ${error.message}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
         }
     }
     val bluetoothStatus = remember(bluetoothRevision) {
@@ -3689,6 +3776,15 @@ private fun SystemScreen(
             } else {
                 "Secure private keys and outgoing plaintext copies are encrypted under Android Keystore."
             },
+        )
+        SystemCard(
+            "LOCAL PERFORMANCE DIAGNOSTICS",
+            "ON DEVICE",
+            Toxic,
+            "Export startup, provider-page, MMS-preview and dropped-frame measurements. " +
+                "The report excludes contacts, phone numbers, message text, attachment names, keys and endpoints.",
+            actionLabel = "EXPORT REPORT",
+            onAction = { diagnosticsExportLauncher.launch("EutherPing-diagnostics.txt") },
         )
     }
 }

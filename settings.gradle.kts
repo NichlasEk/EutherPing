@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "EutherPing"
 include(":app")
+include(":baselineprofile")
