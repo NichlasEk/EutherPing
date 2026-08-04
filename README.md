@@ -23,6 +23,10 @@ duplicates are ignored without another notification; signed frames older than
 remain outside this first authenticated-frame replay slice.
 The reviewed ratcheting-protocol selection and its license gate are documented
 in [`docs/SECURE_PROTOCOL_MIGRATION.md`](docs/SECURE_PROTOCOL_MIGRATION.md).
+The current `libsignal`, Vodozemac, and OpenMLS comparison is in
+[`docs/SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](docs/SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md),
+and the independent-review evidence checklist is in
+[`docs/SECURE_EXTERNAL_REVIEW_PACKET.md`](docs/SECURE_EXTERNAL_REVIEW_PACKET.md).
 
 Version 0.8.5 hardens Secure Vessels storage. Encrypted attachment payloads stay
 in a dedicated private app directory and are no longer decrypted merely because

@@ -27,6 +27,9 @@ reasons:
 
 No `libsignal` binary or source may be added until the owner accepts the license
 and maintenance implications or selects a different reviewed implementation.
+The current permissive-alternative comparison and its additional security gates
+are recorded in
+[`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md).
 
 The protocol rationale is the official
 [`Double Ratchet` specification](https://signal.org/docs/specifications/doubleratchet/):
@@ -135,6 +138,8 @@ keysets, and legacy `EP1` plaintext vault entries.
 6. **Remove Secure Beta only after external review.** Review must cover storage,
    transport envelopes, state transactions, identity UX, notification privacy,
    attachment key binding, and dependency update policy—not just primitives.
+   The reviewer evidence and finding-closure template are in
+   [`SECURE_EXTERNAL_REVIEW_PACKET.md`](SECURE_EXTERNAL_REVIEW_PACKET.md).
 
 ## Required tests and evidence
 

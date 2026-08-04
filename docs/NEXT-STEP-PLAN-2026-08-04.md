@@ -117,6 +117,13 @@ no declared license, so adding the dependency would be a material product and
 distribution decision. The design specifies EP3 coexistence, fresh verification,
 encrypted atomic state, failure/reinstall behavior, test evidence, and external
 review gates.
+The current candidate comparison finds no permissively licensed, reviewed,
+supported Android drop-in: Vodozemac requires an explicit upstream X25519 fix,
+outside-Matrix integration review, and owned Rust/JNI layer; OpenMLS requires a
+larger authentication/delivery architecture. The decision and reviewer-ready
+evidence scope are captured in
+[`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md)
+and [`SECURE_EXTERNAL_REVIEW_PACKET.md`](SECURE_EXTERNAL_REVIEW_PACKET.md).
 
 ## Release rhythm
 
@@ -180,3 +187,9 @@ as complete.
   v2/v1 controls remain readable with exact-duplicate suppression but cannot
   retroactively prove freshness. The reviewed ratcheting-protocol migration
   remains unfinished.
+- Post-`0.8.8` documentation checkpoint: the Secure storage claim is reconciled
+  with the implementation (ciphertext-only attachment storage and explicit
+  in-memory image preview), current permissive protocol alternatives are
+  assessed against 2026 security evidence, and the external-review scope and
+  finding log are ready. No crypto dependency, license, APK, or runtime behavior
+  changes in this checkpoint.
