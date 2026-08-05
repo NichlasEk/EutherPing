@@ -8,8 +8,8 @@ only `libsignal-protocol` can be much smaller, but it would make EutherPing the
 owner of an unsupported native API bridge, an exact nightly Rust toolchain, and
 AGPL distribution compliance.
 
-Vodozemac `0.10.0` is the recommended implementation for the next isolated
-provider spike. It is not approved for production yet. The shipping `app`
+Vodozemac `0.10.0` is implemented as an isolated provider checkpoint. It is
+not approved for production yet. The shipping `app`
 module has no dependency on either probe and its behavior and APK are unchanged.
 
 ## Like-for-like probes
@@ -24,8 +24,8 @@ EutherPing module.
 | Artifact / property | Vodozemac 0.10.0 | Signal libsignal 0.99.4 |
 | --- | ---: | ---: |
 | Supported upstream Android artifact | none | 110,830,208-byte arm64 JNI library |
-| Minimal source-built arm64 protocol library | 437,592 bytes | 730,016 bytes |
-| Minimal release Android library (AAR) | 248,916 bytes | not packaged |
+| Source-built arm64 provider/protocol library | 574,824 bytes | 730,016 bytes |
+| Release Android library (AAR) | 336,272 bytes | not packaged |
 | Host source-built protocol library | not used for decision | 1,001,320 bytes |
 | Rust toolchain | stable 1.97.1 | exact nightly 2026-07-15 |
 | License | Apache-2.0 | AGPL-3.0-only |
@@ -36,8 +36,8 @@ Reproducibility identifiers:
 
 | Measured artifact/source | SHA-256 or commit |
 | --- | --- |
-| Vodozemac arm64 JNI library | `d27f796b1824ccbdb8ee6bb6b78f6852d61ff66b1f757fce20e6a7baf95f8e2a` |
-| Vodozemac arm64 release AAR | `1a6ff623f216de30587fbe360379c363b7682f88f726a44397e2b71c96aa4c5e` |
+| Vodozemac arm64 JNI library | `8c46b3a90ac4faeba449564d97f1ef6b9a2bdfca8cf39ee400b224989ce0b69a` |
+| Vodozemac arm64 release AAR | `e71f451135ffd8fc5a915dda703aa26e6e04dca981931b3f7cd25b7c95e5ed43` |
 | Minimal libsignal arm64 library | `c0edacd246d18d845be7b76f4aab91a7a3938a83a5becbb46820038d04c36c06` |
 | Signal source tag/commit | `v0.99.4` / `387da3e29ac87c821aedc697aee77646a1c72fff` |
 
@@ -53,15 +53,16 @@ already measured by the official Java probe.
 
 The opt-in `crypto-vodozemac` module pins the exact Cargo dependency graph and
 is excluded from normal Gradle configuration unless
-`-PincludeCryptoVodoProbe=true` is supplied. On Android 11 x86_64, the native
-JNI probe passed 1/1 instrumentation tests. Its measured protocol data was:
+`-PincludeCryptoVodoProbe=true` is supplied. On Android 11 x86_64, the provider
+passed 2/2 instrumentation tests. Its current signed frame/state measurements
+are:
 
 ```
-signed key publication   160 bytes
-initial ciphertext       168 bytes
-session ciphertext        63 bytes
-Alice state             1429 bytes
-Bob state               1481 bytes
+signed key publication   164 bytes
+initial ciphertext       269 bytes
+session ciphertext        68 bytes
+Alice session state     1448 bytes
+Bob session state       1487 bytes
 ```
 
 The arm64 library is stripped and its ELF load segments are compatible with
@@ -85,12 +86,11 @@ is frozen, and durable encrypted-state plus two-phone tests pass.
 
 ## Toolchain reproduction
 
-Arch's AUR `android-ndk` package was built locally as version `r29-3`. The final
-system installation requires administrator authentication:
+Arch's AUR `android-ndk` package is installed system-wide as version `r29-3`
+under `/opt/android-ndk`:
 
 ```sh
-sudo pacman -U --noconfirm \
-  /home/nichlas/.cache/yay/android-ndk/android-ndk-r29-3-x86_64.pkg.tar.zst
+pacman -Q android-ndk
 ```
 
 `cargo-ndk` was kept in an isolated Rust environment because the Arch package
@@ -100,15 +100,13 @@ dependency.
 
 ## Next production gates
 
-1. Implement the provider behind `crypto-api`; never expose raw keys or raw JNI
-   handles to UI code.
-2. Specify and authenticate the compact key-publication envelope and safety-code
-   binding. No unauthenticated carrier key lookup is permitted.
-3. Envelope-encrypt opaque pickles in the dedicated Vessel store and make every
-   ratchet transition atomic.
-4. Add malformed input, corrupt pickle, rollback, skipped-key exhaustion,
+1. Replace the in-memory test repository with a dedicated Keystore-encrypted,
+   crash-safe implementation of `secure_sessions_v3`.
+2. Freeze and externally review the compact key-publication envelope and
+   safety-code binding. No unauthenticated carrier key lookup is permitted.
+3. Add malformed input, corrupt pickle, rollback, skipped-key exhaustion,
    reinstall, identity-change, and version-skew fixtures.
-5. Prove Samsung/GrapheneOS interoperability with delayed, duplicated, and
+4. Prove Samsung/GrapheneOS interoperability with delayed, duplicated, and
    out-of-order delivery.
-6. Obtain external cryptographic integration review before EP3 production or
+5. Obtain external cryptographic integration review before EP3 production or
    removal of the Secure Beta label.

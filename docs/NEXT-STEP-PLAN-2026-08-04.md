@@ -120,9 +120,10 @@ bridge. Details are in
 [`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md).
 The current candidate comparison finds no permissively licensed, reviewed,
 supported Android drop-in. Vodozemac 0.10.0 now contains the upstream X25519
-fix and its isolated Android probe is small enough to become the selected next
-provider spike; outside-Matrix integration review, 64-bit-tag acceptance, and
-an owned Rust/JNI layer remain gates. OpenMLS requires a larger
+fix and is implemented behind `SecureProtocolProvider` as an isolated,
+transactional Android checkpoint; a Keystore-encrypted durable repository,
+outside-Matrix integration review, and 64-bit-tag acceptance remain gates.
+OpenMLS requires a larger
 authentication/delivery architecture. The decision and reviewer-ready evidence
 scope are captured in
 [`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md)

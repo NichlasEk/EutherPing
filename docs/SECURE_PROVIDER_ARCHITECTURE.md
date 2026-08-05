@@ -25,11 +25,14 @@ provider, EP1, ordinary SMS, or MMS.
 is measurement scaffolding, not an interoperable EutherPing protocol. The
 shipping `app` module deliberately has no dependency on it.
 
-`crypto-vodozemac` is the selected next provider spike after the measured
-size/license comparison. It is opt-in at Gradle settings level, consists of a
-small Kotlin/JNI boundary and a pinned Rust crate, and is also non-shipping.
-It does not yet implement `SecureProtocolProvider`; advancing it requires the
-production gates in
+`crypto-vodozemac` implements `SecureProtocolProvider` as an opt-in,
+non-shipping checkpoint. Kotlin sees only opaque account/session bytes through
+a bounded JNI frame; every key generation, session setup, encrypt, and decrypt
+operation executes inside one `ProtocolStateRepository` transaction. Signed
+pre-key frames bind the Olm Curve25519 identity to the Ed25519 signing identity,
+and provider/kind/identity mismatch fails before state commits. The present
+tests use copy-on-write memory repositories; advancing it requires the durable
+storage and production gates in
 [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md).
 
 ## State boundary

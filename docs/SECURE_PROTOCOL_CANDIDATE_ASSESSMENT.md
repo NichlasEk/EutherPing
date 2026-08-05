@@ -33,9 +33,10 @@ measured native size, SMS framing size, durable encrypted store, distribution
 license review, and external security review remain release gates.
 The direct source-build comparison removes size as an absolute libsignal
 blocker, but only by replacing Signal's supported bridge with an EutherPing-owned
-one. Vodozemac `0.10.0` is therefore selected for the next isolated provider
-spike: its arm64 JNI probe is small, stable-Rust based, Apache-2.0 licensed, and
-passes the fixed non-contributory-key case on Android. It is not production
+one. Vodozemac `0.10.0` is therefore implemented as an isolated provider
+checkpoint: its arm64 JNI layer is small, stable-Rust based, Apache-2.0
+licensed, and passes signed identity, rollback, reload, replay, and
+out-of-order cases on Android. It is not production
 approved. Authenticated key distribution, durable encrypted state, the Olm v1
 64-bit-tag/no-PQ trade-off, two-phone interoperability, and external review
 remain gates. Exact measurements and the decision are in

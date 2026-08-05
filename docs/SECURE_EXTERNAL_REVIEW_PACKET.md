@@ -23,6 +23,8 @@ state handling, not infer safety from the primitives alone.
   state, migration, and release gates.
 - [`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md):
   current dependency and license comparison.
+- [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md):
+  measured JNI/provider checkpoint, license choice, and remaining gates.
 - [`PRIVACY.md`](PRIVACY.md): user-facing storage and disclosure claims.
 
 ## Required code review areas
@@ -55,6 +57,10 @@ state handling, not infer safety from the primitives alone.
   transient cache cleanup tests.
 - Conversation-index tests proving Secure plaintext is replaced before cache
   persistence.
+- The isolated Vodozemac provider's signed key publication, signed initial
+  identity binding, bidirectional/out-of-order ratchet, opaque reload, replay
+  rejection, identity-change rejection, and copy-on-write rollback tests on
+  Android 11. This module is not linked into the shipping app.
 - Full 0.8.9 unit, lint, debug/release, and instrumentation gate, including
   ordinary/Secure draft namespace separation and legacy metadata migration.
 
