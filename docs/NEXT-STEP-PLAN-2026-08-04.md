@@ -110,19 +110,23 @@ Acceptance: an implementation and migration design can be independently
 reviewed; legacy conversations fail safely; no silent plaintext fallback exists.
 
 Design status: [`SECURE_PROTOCOL_MIGRATION.md`](SECURE_PROTOCOL_MIGRATION.md)
-selects Signal's current `libsignal` as the leading one-to-one implementation
-and MLS as a later group candidate. The owner accepted the libsignal/AGPLv3
-direction on 2026-08-05. A provider-neutral API and pinned `0.99.4` adapter now
-exist only in isolated, non-shipping modules. The spike proves Alice/Bob
-ratcheting, out-of-order delivery, replay rejection, reload, atomic rollback,
-and Android JNI loading, but exposes blocking SMS and APK-size costs. Details
-are in [`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md).
+establishes the provider boundary and MLS as a later group candidate. The owner
+accepted an isolated libsignal/AGPLv3 spike on 2026-08-05. That spike proves
+Alice/Bob ratcheting, out-of-order delivery, replay rejection, reload, atomic
+rollback, and Android JNI loading, but its supported bridge is too large and
+its SMS prekey path impractical. A later protocol-only source build proves size
+is not intrinsic, at the cost of owning an unsupported nightly-Rust/AGPL JNI
+bridge. Details are in
+[`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md).
 The current candidate comparison finds no permissively licensed, reviewed,
-supported Android drop-in: Vodozemac requires an explicit upstream X25519 fix,
-outside-Matrix integration review, and owned Rust/JNI layer; OpenMLS requires a
-larger authentication/delivery architecture. The decision and reviewer-ready
-evidence scope are captured in
+supported Android drop-in. Vodozemac 0.10.0 now contains the upstream X25519
+fix and its isolated Android probe is small enough to become the selected next
+provider spike; outside-Matrix integration review, 64-bit-tag acceptance, and
+an owned Rust/JNI layer remain gates. OpenMLS requires a larger
+authentication/delivery architecture. The decision and reviewer-ready evidence
+scope are captured in
 [`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md)
+and [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md),
 and [`SECURE_EXTERNAL_REVIEW_PACKET.md`](SECURE_EXTERNAL_REVIEW_PACKET.md).
 
 ## Release rhythm

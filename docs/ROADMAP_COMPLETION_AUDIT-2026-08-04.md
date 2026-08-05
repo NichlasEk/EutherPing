@@ -38,9 +38,10 @@ evidence.
 2. Run the documented Samsung/GrapheneOS performance, biometric, outbox,
    multi-SIM, group-MMS, and Secure attachment matrices with both phones
    connected and their intended SIM/carrier conditions available.
-3. Resolve the spike's prekey/SMS and native-size blockers. Then implement the
-   encrypted transactional session store, freeze an EP3 harness, and run an
-   opt-in two-device beta plus migration/downgrade tests.
+3. Resolve authenticated prekey delivery and select between the measured
+   Vodozemac probe and a separately reviewed minimal libsignal bridge. Then
+   implement the encrypted transactional session store, freeze an EP3 harness,
+   and run an opt-in two-device beta plus migration/downgrade tests.
 4. Commission the external review described in
    [`SECURE_EXTERNAL_REVIEW_PACKET.md`](SECURE_EXTERNAL_REVIEW_PACKET.md), fix
    every finding, and obtain reviewer retest sign-off.

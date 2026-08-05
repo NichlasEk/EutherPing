@@ -3,4 +3,6 @@
 .idea/
 local.properties
 **/build/
+**/target/
+.tmp/
 *.iml

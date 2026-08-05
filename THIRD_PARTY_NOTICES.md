@@ -19,3 +19,13 @@ These modules are not dependencies of the shipping EutherPing `app` module and
 their binaries are not included in the current EutherPing APK. Before any build
 containing libsignal is distributed, the complete corresponding-source and
 license-notice procedure must be reviewed and packaged with that build.
+
+## Vodozemac 0.10.0
+
+The opt-in, non-shipping `crypto-vodozemac` probe depends on Matrix's Vodozemac
+version `0.10.0`, licensed Apache License 2.0. Upstream source and license:
+<https://github.com/matrix-org/vodozemac>.
+
+The module is not a dependency of the shipping EutherPing `app` module and its
+native library is not included in the current APK. Its exact Rust dependency
+graph and checksums are pinned in `crypto-vodozemac/native/Cargo.lock`.

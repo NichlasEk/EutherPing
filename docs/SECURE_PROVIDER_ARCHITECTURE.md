@@ -8,7 +8,7 @@ EutherPing app
     +-- crypto-api: SecureProtocolProvider boundary
             |
             +-- crypto-libsignal: libsignal 0.99.4 (AGPL-3.0-only)
-            +-- future reviewed provider
+            +-- crypto-vodozemac: Vodozemac 0.10.0 probe (Apache-2.0)
             +-- legacy Tink reader/migration adapter (future)
 ```
 
@@ -24,6 +24,13 @@ provider, EP1, ordinary SMS, or MMS.
 `EP3-LS-PROBE`, version `0.99.4`, and `productionReady=false`. The probe framing
 is measurement scaffolding, not an interoperable EutherPing protocol. The
 shipping `app` module deliberately has no dependency on it.
+
+`crypto-vodozemac` is the selected next provider spike after the measured
+size/license comparison. It is opt-in at Gradle settings level, consists of a
+small Kotlin/JNI boundary and a pinned Rust crate, and is also non-shipping.
+It does not yet implement `SecureProtocolProvider`; advancing it requires the
+production gates in
+[`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md).
 
 ## State boundary
 
@@ -42,6 +49,10 @@ terms compatible with AGPLv3 and include the required source and notices. A
 future Play flavor must either satisfy that reviewed distribution plan or omit
 the module and use a separately reviewed provider. The probe APK is not a
 release artifact.
+
+Vodozemac's Apache-2.0 license is materially simpler for a future Play flavor,
+but does not waive protocol, key-distribution, native-memory, or external-review
+requirements.
 
 Production activation additionally requires a frozen EP3 specification,
 practical authenticated prekey delivery, encrypted durable storage, downgrade
