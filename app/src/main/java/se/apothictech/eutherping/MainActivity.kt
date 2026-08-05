@@ -143,6 +143,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import se.apothictech.eutherping.contacts.ContactRepository
 import se.apothictech.eutherping.contacts.PhoneContact
 import se.apothictech.eutherping.secure.SecurePeerState
+import se.apothictech.eutherping.secure.SecureProtocol
 import se.apothictech.eutherping.secure.SecureAttachmentDescriptor
 import se.apothictech.eutherping.secure.SecureAttachmentRepository
 import se.apothictech.eutherping.secure.BluetoothAttachmentTransport
@@ -2266,7 +2267,8 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 secureOnly = secureLane,
                 enabled = !secureLane || securePeer?.canEncrypt == true,
                 attachmentBusy = attachmentBusy,
-                attachmentEnabled = isRealSms,
+                attachmentEnabled = isRealSms &&
+                    (!secureLane || securePeer?.protocol != SecureProtocol.RATCHET_EP3),
                 carrierMmsUri = pendingCarrierMmsUri.takeUnless { secureLane },
                 carrierSubscriptions = carrierSubscriptions,
                 selectedSubscriptionId = selectedSubscriptionId,
@@ -2308,6 +2310,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     item {
                         SecurePairingCard(
                             peerState = securePeer?.state ?: SecurePeerState.NONE,
+                            protocol = securePeer?.protocol ?: SecureProtocol.LEGACY_EP1,
                             safetyNumber = SecureRepository.safetyNumber(
                                 context,
                                 conversation.smsAddress.orEmpty(),
@@ -2323,6 +2326,19 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                                     }
                                     .onFailure {
                                         Toast.makeText(context, "Invite failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                    }
+                            },
+                            onUpgrade = {
+                                SecureRepository.createInvitation(
+                                    context,
+                                    conversation.smsAddress.orEmpty(),
+                                ).flatMap { SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), it) }
+                                    .onSuccess {
+                                        secureRevision++
+                                        Toast.makeText(context, "EP3 upgrade invitation sent", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .onFailure {
+                                        Toast.makeText(context, "EP3 upgrade failed: ${it.message}", Toast.LENGTH_LONG).show()
                                     }
                             },
                             onAccept = {
@@ -3357,8 +3373,10 @@ private fun ContactResultRow(contact: PhoneContact, onClick: () -> Unit) {
 @Composable
 private fun SecurePairingCard(
     peerState: SecurePeerState,
+    protocol: SecureProtocol,
     safetyNumber: String?,
     onInvite: () -> Unit,
+    onUpgrade: () -> Unit,
     onAccept: () -> Unit,
     onVerify: () -> Unit,
     onAcceptIdentityChange: () -> Unit,
@@ -3378,7 +3396,11 @@ private fun SecurePairingCard(
                     SecurePeerState.INVITE_SENT -> "SECURE PING // AWAITING ECHO"
                     SecurePeerState.INVITE_RECEIVED -> "SECURE PING // INVITE DETECTED"
                     SecurePeerState.ACTIVE_UNVERIFIED -> "SECURE BETA // KEY UNVERIFIED"
-                    SecurePeerState.VERIFIED -> "SECURE BETA // IDENTITY VERIFIED"
+                    SecurePeerState.VERIFIED -> if (protocol == SecureProtocol.RATCHET_EP3) {
+                        "EP3 RATCHET BETA // IDENTITY VERIFIED"
+                    } else {
+                        "SECURE BETA // LEGACY IDENTITY VERIFIED"
+                    }
                     SecurePeerState.IDENTITY_CHANGE_PENDING -> "SECURE WARNING // IDENTITY CHANGED"
                 },
                 color = Violet,
@@ -3388,11 +3410,15 @@ private fun SecurePairingCard(
             )
             Text(
                 when (peerState) {
-                    SecurePeerState.NONE -> "Send a signed EutherPing key invitation. It can use two ordinary SMS parts."
+                    SecurePeerState.NONE -> "Send a signed EP3 invitation with this phone's ratchet pre-key. It can use several SMS parts."
                     SecurePeerState.INVITE_SENT -> "The other phone must open this thread and accept the invitation."
                     SecurePeerState.INVITE_RECEIVED -> "Accept to return this phone's public keys and enable encrypted SMS capsules."
                     SecurePeerState.ACTIVE_UNVERIFIED -> "Compare this safety code on both phones before marking the identity verified."
-                    SecurePeerState.VERIFIED -> "Messages use authenticated HPKE capsules over carrier SMS. Carrier charges may apply."
+                    SecurePeerState.VERIFIED -> if (protocol == SecureProtocol.RATCHET_EP3) {
+                        "Text messages ratchet through Vodozemac over carrier SMS. EP3 attachments remain locked."
+                    } else {
+                        "Legacy HPKE remains readable. Upgrade explicitly to start a new EP3 ratchet session."
+                    }
                     SecurePeerState.IDENTITY_CHANGE_PENDING -> "A different identity arrived. Secure sending is locked. Compare the new safety code before trusting it."
                 },
                 color = Mist,
@@ -3412,7 +3438,11 @@ private fun SecurePairingCard(
                 )
             }
             Text(
-                "SECURE BETA: no Double Ratchet or forward-secrecy claim yet.",
+                if (protocol == SecureProtocol.RATCHET_EP3) {
+                    "RATCHET BETA: Vodozemac Olm v1 // external review pending."
+                } else {
+                    "LEGACY SECURE BETA: no forward secrecy."
+                },
                 color = Amber.copy(alpha = 0.82f),
                 fontFamily = FontFamily.Monospace,
                 fontSize = 9.sp,
@@ -3437,7 +3467,15 @@ private fun SecurePairingCard(
                     colors = ButtonDefaults.buttonColors(containerColor = Toxic, contentColor = Void),
                     modifier = Modifier.padding(top = 11.dp),
                 ) { Text("CODES MATCH — VERIFY", fontWeight = FontWeight.Black) }
-                SecurePeerState.VERIFIED -> Unit
+                SecurePeerState.VERIFIED -> if (protocol == SecureProtocol.LEGACY_EP1) {
+                    Button(
+                        onClick = onUpgrade,
+                        colors = ButtonDefaults.buttonColors(containerColor = Violet, contentColor = Color.White),
+                        modifier = Modifier.padding(top = 11.dp),
+                    ) { Text("UPGRADE TO EP3", fontWeight = FontWeight.Black) }
+                } else {
+                    Unit
+                }
                 SecurePeerState.IDENTITY_CHANGE_PENDING -> Row(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.padding(top = 11.dp),

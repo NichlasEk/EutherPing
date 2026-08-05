@@ -5,8 +5,8 @@
 `crypto-storage-android` is a real Android implementation of
 `ProtocolStateRepository`, not an in-memory format mock. From EutherPing 0.8.11
 the shipping `app` always includes it and prepares the local Vodozemac account
-and signed pre-key publication during process startup. No EP3 carrier traffic
-or existing-conversation migration is enabled yet.
+and signed pre-key publication during process startup. EutherPing 0.8.12 uses
+that state for explicitly paired and re-verified EP3 text sessions.
 
 ## Storage boundary
 
@@ -69,12 +69,11 @@ identity at restart.
 
 - A new repository instance exercises the process-persistence boundary, but an
   actual force-stop/reboot sequence still needs physical-device evidence.
-- The module is linked and initialized, but no session is selected for carrier
-  traffic until EP3 framing, safety-code binding, reset UX, and authenticated
-  pre-key delivery are frozen.
+- EP3 text is now selected only after signed pre-key delivery and explicit
+  safety-code verification. EP3 attachment and verified-reset UX remain locked.
 - The repository serializes transitions inside one app process. EutherPing must
   keep session mutation in that process or add an explicit cross-process lock.
-- Samsung and GrapheneOS must prove Keystore availability, reboot behavior,
+- Samsung and GrapheneOS must still prove Keystore availability, reboot behavior,
   delayed/out-of-order delivery, identity replacement, state loss, and storage
   inspection before ratcheted carrier traffic ships.
 - External review remains mandatory before production activation or removal of

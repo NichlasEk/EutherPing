@@ -3,6 +3,7 @@ package se.apothictech.eutherping.secure
 import android.content.Context
 import java.util.concurrent.atomic.AtomicBoolean
 import se.apothictech.eutherping.crypto.ProtocolAddress
+import se.apothictech.eutherping.crypto.ProtocolCiphertext
 import se.apothictech.eutherping.crypto.ProtocolPreKeyPublication
 import se.apothictech.eutherping.crypto.SecureProtocolDescriptor
 import se.apothictech.eutherping.crypto.storage.SecureSessionStateRepository
@@ -51,6 +52,52 @@ object SecureRatchetRuntime {
                 cachedPublication = it
             }.copyPayload()
         }
+    }
+
+    fun establishOutboundSession(
+        context: Context,
+        remoteAddress: String,
+        publication: ByteArray,
+    ): Result<Unit> = runCatching {
+        engine(context).establishOutboundSession(
+            ProtocolAddress(protocolAddress(remoteAddress)),
+            ProtocolPreKeyPublication(descriptor.providerId, publication.copyOf()),
+        )
+    }
+
+    fun encrypt(
+        context: Context,
+        remoteAddress: String,
+        plaintext: ByteArray,
+    ): Result<ProtocolCiphertext> = runCatching {
+        engine(context).encrypt(ProtocolAddress(protocolAddress(remoteAddress)), plaintext)
+    }
+
+    fun decrypt(
+        context: Context,
+        remoteAddress: String,
+        ciphertext: ProtocolCiphertext,
+    ): Result<ByteArray> = runCatching {
+        engine(context).decrypt(ProtocolAddress(protocolAddress(remoteAddress)), ciphertext)
+    }
+
+    fun acceptanceMatchesPublication(
+        ciphertext: ProtocolCiphertext,
+        publication: ByteArray,
+    ): Boolean = VodozemacProvider.acceptanceMatchesPublication(
+        ciphertext,
+        ProtocolPreKeyPublication(descriptor.providerId, publication.copyOf()),
+    )
+
+    private fun engine(context: Context) = VodozemacProvider().createEngine(
+        ProtocolAddress(LOCAL_ADDRESS),
+        SecureSessionStateRepository(context.applicationContext, NAMESPACE),
+    )
+
+    private fun protocolAddress(address: String): String = address.trim().filter {
+        it.isDigit() || it == '+'
+    }.also {
+        require(it.isNotBlank()) { "A ratchet peer address is required" }
     }
 
     private fun createPublication(

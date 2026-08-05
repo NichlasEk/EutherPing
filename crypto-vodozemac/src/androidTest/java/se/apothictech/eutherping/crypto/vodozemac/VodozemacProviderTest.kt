@@ -79,6 +79,7 @@ class VodozemacProviderTest {
         var alice = provider.createEngine(aliceAddress, aliceState)
         var bob = provider.createEngine(bobAddress, bobState)
 
+        val alicePublication = alice.createPreKeyPublication()
         val bobPublication = bob.createPreKeyPublication()
         assertEquals(VodozemacProvider.PROVIDER_ID, bobPublication.providerId)
         assertEquals(164, bobPublication.payload.size)
@@ -93,6 +94,7 @@ class VodozemacProviderTest {
 
         val initial = alice.encrypt(bobAddress, "first".encodeToByteArray())
         assertEquals(ProtocolCiphertextKind.PRE_KEY, initial.kind)
+        assertTrue(VodozemacProvider.acceptanceMatchesPublication(initial, alicePublication))
         assertTrue(initial.payload.size <= 300)
         assertArrayEquals("first".encodeToByteArray(), bob.decrypt(aliceAddress, initial))
 
@@ -151,6 +153,7 @@ class VodozemacProviderTest {
 
         assertArrayEquals("first".encodeToByteArray(), bob.decrypt(aliceAddress, validInitial))
         val newBobPublication = bob.createPreKeyPublication()
+        assertFalse(VodozemacProvider.acceptanceMatchesPublication(validInitial, newBobPublication))
         val mallory = provider.createEngine(
             ProtocolAddress("mallory"),
             CopyOnWriteMemoryRepository(),

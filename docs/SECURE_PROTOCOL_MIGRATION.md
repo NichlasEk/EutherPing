@@ -1,7 +1,8 @@
 # Secure Vessels reviewed-protocol migration
 
-Status: isolated dependency-spike checkpoint for independent review. No new
-protocol is enabled in the shipping app. EutherPing remains **Secure Beta**.
+Status: EutherPing 0.8.12 paired-device Ratchet Beta. EP3 text traffic is now
+enabled only after a fresh explicit pairing and safety-code verification.
+Independent review and physical two-phone evidence remain incomplete.
 
 The legacy identity-control boundary, including the signed fresh version 3
 pairing capsule and its fail-closed replacement policy, is documented in
@@ -10,25 +11,21 @@ entry but is not a substitute for the reviewed session protocol below.
 
 ## Decision
 
-The leading implementation for one-to-one Secure Vessels is Signal's current
-[`libsignal`](https://github.com/signalapp/libsignal), using its Java/Android
-packages and protocol state machine rather than implementing Double Ratchet in
-EutherPing. Signal documents that this implementation includes Double Ratchet,
-is used by its official clients, and publishes Android ABIs and Java artifacts.
+The selected implementation for the current one-to-one beta is Apache-2.0
+Vodozemac 0.10.0 through EutherPing's provider-neutral interface. Vodozemac
+owns session establishment, encryption/decryption, skipped-key handling,
+serialization, and ratchet advancement. EutherPing owns transport framing,
+persistence adapters, identity policy, and UI.
 
-On 2026-08-05 the owner explicitly accepted the `libsignal`/AGPLv3 direction for
-an isolated spike. Version `0.99.4` is therefore pinned only in the non-shipping
-`crypto-libsignal` and `crypto-probe-app` modules. The ordinary `app` module has
-no dependency on either module and its APK contains no libsignal classes or
-native libraries. Signal states that use outside Signal is unsupported and that
-APIs may change without notice, so EutherPing still owns compatibility,
-update, security-response, distribution-license, and Play-policy review.
+The libsignal 0.99.4 experiment remains isolated in non-shipping probe modules.
+Its measured Android size and carrier-unfriendly initial message prevented it
+from becoming the shipping provider. The app contains the smaller Vodozemac
+provider for arm64 and x86_64 test builds.
 
-The measured spike and its stop-ship findings are recorded in
-[`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md). In particular,
-the current post-quantum prekey and first ciphertext are too large to activate
-over carrier SMS. No `EP3` format is frozen and no existing Vessel is migrated.
-The current permissive-alternative comparison and its additional security gates
+The measured libsignal stop-ship findings are recorded in
+[`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md). Its current
+post-quantum prekey and first ciphertext remain too large for this carrier-SMS
+design. The permissive-alternative comparison and its additional security gates
 are recorded in
 [`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md).
 
@@ -63,29 +60,26 @@ group feature.
 
 ## Proposed wire transition
 
-New envelopes use an `EP3` family and an unambiguous binary payload encoded for
-SMS transport. Exact bytes and limits are frozen only after the dependency spike
-can measure current library output.
+The 0.8.12 beta uses binary, URL-safe Base64 SMS envelopes:
 
-- `EP3P`: versioned prekey/session-establishment payload.
+- `EP3I`: signed version 4 Tink identity plus Vodozemac pre-key publication.
+- `EP3A`: first encrypted PRE_KEY message containing the acceptor's signed
+  identity and ratchet publication.
 - `EP3M`: ratcheted one-to-one application message.
-- `EP3F`: ratcheted manifest for an attachment that remains encrypted at rest
-  and in direct Wi-Fi/Bluetooth transit.
-- `EP3R`: explicit reset request carrying no plaintext and requiring user-visible
-  re-verification before a replacement identity is trusted.
+- `EP3F`: reserved and not implemented; attachments fail closed for EP3.
+- `EP3R`: reserved and not implemented; verified reset UX remains a release gate.
 
-Every envelope binds protocol version, sender/recipient identity, EutherPing
-conversation ID, payload kind, and transport-fragment metadata as authenticated
-associated data where the selected library API permits. Multipart assembly is
-bounded before parsing. Unknown versions, malformed frames, downgrade attempts,
-and duplicate protocol messages fail closed.
+The encrypted EP3M plaintext binds its UUID, timestamp, sender fingerprint,
+recipient fingerprint, and text. The outer frame repeats the UUID and carries
+the provider ciphertext kind; both are checked after authenticated decryption.
+Multipart assembly is performed by Android's SMS delivery path. Unknown
+versions, malformed lengths, provider mismatches, downgrade attempts, and
+duplicate provider messages fail closed.
 
-SMS cost and reliability are release gates. PQXDH prekey material and initial
-messages may be much larger than current pairing capsules. The spike must record
-serialized sizes and multipart counts on real carriers before EP3 can ship. If
-the supported asynchronous handshake is not practical over SMS, EutherPing must
-add a narrowly scoped prekey delivery service or choose another reviewed
-protocol; it must not simplify PQXDH or invent a smaller handshake.
+SMS cost and reliability remain release gates. EP3I and EP3A can be much larger
+than legacy pairing capsules, so serialized sizes and multipart counts must be
+recorded on real carriers. EutherPing must not simplify or reimplement the
+provider handshake to reduce that cost.
 
 ## Private state layout
 
@@ -127,10 +121,10 @@ keysets, and legacy `EP1` plaintext vault entries.
    exposure.
 2. **Encrypted protocol store.** Implement atomic Keystore-envelope adapters and
    crash/reload tests with synthetic identities only.
-3. **EP3 interoperability harness.** Run Alice and Bob as independent stores and
-   processes. Freeze app-level envelope fixtures only after library output and
-   state transitions pass.
-4. **Opt-in paired-device beta.** Require a new verification and show a distinct
+3. **EP3 interoperability harness.** Independent encrypted Alice/Bob stores now
+   cover initial, bidirectional, out-of-order, replay, tamper, identity
+   substitution, and reload transitions. App-envelope fuzz/crash coverage remains.
+4. **Opt-in paired-device beta.** Implemented in 0.8.12: require a new verification and show a distinct
    `RATCHET BETA` state. Keep EP1 history read-only. Never auto-upgrade one phone
    while the peer cannot understand EP3.
 5. **Migration release.** Enable new sessions only after Samsung and GrapheneOS
@@ -161,7 +155,7 @@ keysets, and legacy `EP1` plaintext vault entries.
 
 ## Completion gate
 
-Phase 6 is not complete when this design is merged. It completes only when a
+Phase 6 is not complete with the paired-device beta. It completes only when a
 license-compatible reviewed library is integrated, EP3 interoperability and
 failure tests pass, two physical phones complete a newly verified session, the
 legacy path cannot be selected as a downgrade, and external review findings are

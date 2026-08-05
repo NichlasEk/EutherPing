@@ -1,6 +1,6 @@
 # Secure protocol provider architecture
 
-Status: always-included local runtime checkpoint, 2026-08-05.
+Status: EutherPing 0.8.12 paired-device Ratchet Beta, 2026-08-05.
 
 ```
 EutherPing app
@@ -8,7 +8,7 @@ EutherPing app
     +-- crypto-api: SecureProtocolProvider boundary
     |       |
     |       +-- crypto-libsignal: libsignal 0.99.4 (AGPL-3.0-only)
-    |       +-- crypto-vodozemac: Vodozemac 0.10.0 probe (Apache-2.0)
+    |       +-- crypto-vodozemac: Vodozemac 0.10.0 beta (Apache-2.0)
     |       +-- legacy Tink reader/migration adapter (future)
     |
     +-- crypto-storage-android: Keystore + AtomicFile secure_sessions_v3
@@ -36,7 +36,8 @@ pre-key frames bind the Olm Curve25519 identity to the Ed25519 signing identity,
 and provider/kind/identity mismatch fails before state commits. Provider tests
 cover both copy-on-write memory repositories and real Keystore-backed Android
 repositories. App startup now prepares and reuses one signed publication, while
-carrier use still requires the production gates in
+0.8.12 uses it only for explicitly paired and re-verified EP3 text; production
+use still requires the remaining gates in
 [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md).
 
 ## State boundary
@@ -65,7 +66,6 @@ Vodozemac's Apache-2.0 license is materially simpler for a future Play flavor,
 but does not waive protocol, key-distribution, native-memory, or external-review
 requirements.
 
-Production activation additionally requires a frozen EP3 specification,
-practical authenticated prekey delivery, encrypted durable storage, downgrade
-and identity-change fixtures, Samsung/GrapheneOS interoperability, dependency
-update ownership, and external review.
+Production activation still requires Samsung/GrapheneOS interoperability,
+verified reset UX, atomic receive-state/plaintext recovery, broader envelope
+fixtures and fuzzing, dependency update ownership, and external review.

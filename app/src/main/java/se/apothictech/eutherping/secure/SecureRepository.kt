@@ -32,6 +32,13 @@ import java.nio.charset.StandardCharsets.UTF_8
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.UUID
+import se.apothictech.eutherping.crypto.ProtocolCiphertext
+import se.apothictech.eutherping.crypto.ProtocolCiphertextKind
+
+enum class SecureProtocol {
+    LEGACY_EP1,
+    RATCHET_EP3,
+}
 
 enum class SecurePeerState {
     NONE,
@@ -52,13 +59,17 @@ data class SecurePeer(
     val pendingSigningPublicKey: ByteArray? = null,
     val pendingFingerprint: String? = null,
     val pendingRequiresAcceptance: Boolean = false,
+    val protocol: SecureProtocol = SecureProtocol.LEGACY_EP1,
+    val ratchetPublication: ByteArray? = null,
+    val pendingRatchetPublication: ByteArray? = null,
 ) {
     val hasKeys: Boolean
         get() = encryptionPublicKey != null &&
             signingPublicKey != null
 
     val canEncrypt: Boolean
-        get() = hasKeys && state == SecurePeerState.VERIFIED
+        get() = hasKeys && state == SecurePeerState.VERIFIED &&
+            (protocol != SecureProtocol.RATCHET_EP3 || ratchetPublication != null)
 }
 
 data class SecureDecodedMessage(
@@ -93,19 +104,26 @@ data class SecureAttachmentDescriptor(
 }
 
 object SecureRepository {
-    const val INVITE_PREFIX = "EP2I:"
-    const val ACCEPT_PREFIX = "EP2A:"
+    const val INVITE_PREFIX = "EP3I:"
+    const val ACCEPT_PREFIX = "EP3A:"
+    const val RATCHET_MESSAGE_PREFIX = "EP3M:"
     const val MESSAGE_PREFIX = "EP1M:"
     const val ATTACHMENT_PREFIX = "EP1F:"
 
     private const val LEGACY_INVITE_PREFIX = "EP1I:"
     private const val LEGACY_ACCEPT_PREFIX = "EP1A:"
+    private const val LEGACY_COMPACT_INVITE_PREFIX = "EP2I:"
+    private const val LEGACY_COMPACT_ACCEPT_PREFIX = "EP2A:"
+    private const val INTERNAL_ACCEPT_PREFIX = "EP3C:"
     private const val HPKE_PUBLIC_TYPE_URL = "type.googleapis.com/google.crypto.tink.HpkePublicKey"
     private const val ED25519_PUBLIC_TYPE_URL = "type.googleapis.com/google.crypto.tink.Ed25519PublicKey"
 
     val secureBodyPrefixes = listOf(
         INVITE_PREFIX,
         ACCEPT_PREFIX,
+        RATCHET_MESSAGE_PREFIX,
+        LEGACY_COMPACT_INVITE_PREFIX,
+        LEGACY_COMPACT_ACCEPT_PREFIX,
         LEGACY_INVITE_PREFIX,
         LEGACY_ACCEPT_PREFIX,
         MESSAGE_PREFIX,
@@ -124,7 +142,7 @@ object SecureRepository {
     private const val CONTEXT_LABEL = "EutherPing Secure Beta v1|"
     private const val BASE64_FLAGS = Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING
     private const val CONTROL_ID_BYTES = 16
-    private const val MAX_COMPACT_CONTROL_BASE64_CHARS = 301
+    private const val MAX_COMPACT_CONTROL_BASE64_CHARS = 768
     private val COMPACT_CONTROL_BASE64 = Regex("[A-Za-z0-9_-]+")
 
     @Volatile
@@ -173,7 +191,7 @@ object SecureRepository {
         return runCatching {
             val json = JSONObject(raw)
             SecurePeer(
-                address = normalized,
+                address = json.optString("address").takeIf(String::isNotBlank) ?: normalized,
                 encryptionPublicKey = json.optString("e").takeIf(String::isNotBlank)?.let(::decode),
                 signingPublicKey = json.optString("s").takeIf(String::isNotBlank)?.let(::decode),
                 fingerprint = json.optString("f").takeIf(String::isNotBlank),
@@ -182,6 +200,11 @@ object SecureRepository {
                 pendingSigningPublicKey = json.optString("ps").takeIf(String::isNotBlank)?.let(::decode),
                 pendingFingerprint = json.optString("pf").takeIf(String::isNotBlank),
                 pendingRequiresAcceptance = json.optBoolean("pa", false),
+                protocol = runCatching {
+                    SecureProtocol.valueOf(json.optString("protocol"))
+                }.getOrDefault(SecureProtocol.LEGACY_EP1),
+                ratchetPublication = json.optString("rp").takeIf(String::isNotBlank)?.let(::decode),
+                pendingRatchetPublication = json.optString("prp").takeIf(String::isNotBlank)?.let(::decode),
             )
         }.getOrElse { SecurePeer(normalized, null, null, null, SecurePeerState.NONE) }
     }
@@ -190,11 +213,23 @@ object SecureRepository {
         val normalized = normalizeAddress(address)
         require(normalized.isNotBlank()) { "A destination number is required" }
         val current = peer(context, normalized)
-        check(!current.hasKeys) { "A Secure identity already exists for this contact" }
-        val wire = encodeBundle(context, INVITE_PREFIX, identity(context))
+        check(current.protocol != SecureProtocol.RATCHET_EP3 || current.state != SecurePeerState.VERIFIED) {
+            "This contact already uses EP3"
+        }
+        val publication = SecureRatchetRuntime.ensureReady(context).getOrThrow().payload
+        val wire = encodeBundle(
+            context,
+            INVITE_PREFIX,
+            identity(context).copy(ratchetPublication = publication),
+        )
         savePeer(
             context,
-            SecurePeer(normalized, null, null, null, SecurePeerState.INVITE_SENT),
+            current.copy(
+                address = current.address.ifBlank { normalized },
+                state = SecurePeerState.INVITE_SENT,
+                protocol = SecureProtocol.RATCHET_EP3,
+                ratchetPublication = null,
+            ),
         )
         wire
     }
@@ -205,8 +240,39 @@ object SecureRepository {
         check(current.encryptionPublicKey != null && current.signingPublicKey != null) {
             "The invitation has no usable keys"
         }
-        savePeer(context, current.copy(state = SecurePeerState.ACTIVE_UNVERIFIED))
-        encodeBundle(context, ACCEPT_PREFIX, identity(context))
+        val remotePublication = current.ratchetPublication
+        if (remotePublication == null) {
+            savePeer(context, current.copy(state = SecurePeerState.ACTIVE_UNVERIFIED))
+            return@runCatching encodeBundle(
+                context,
+                LEGACY_COMPACT_ACCEPT_PREFIX,
+                identity(context),
+            )
+        }
+        SecureRatchetRuntime.establishOutboundSession(
+            context,
+            current.address,
+            remotePublication,
+        ).getOrThrow()
+        val localPublication = SecureRatchetRuntime.ensureReady(context).getOrThrow().payload
+        val signedAcceptance = encodeBundle(
+            context,
+            INTERNAL_ACCEPT_PREFIX,
+            identity(context).copy(ratchetPublication = localPublication),
+        )
+        val ciphertext = SecureRatchetRuntime.encrypt(
+            context,
+            current.address,
+            signedAcceptance.toByteArray(UTF_8),
+        ).getOrThrow()
+        savePeer(
+            context,
+            current.copy(
+                state = SecurePeerState.ACTIVE_UNVERIFIED,
+                protocol = SecureProtocol.RATCHET_EP3,
+            ),
+        )
+        encodeRatchetFrame(ACCEPT_PREFIX, null, ciphertext)
     }
 
     fun markVerified(context: Context, address: String) {
@@ -225,7 +291,10 @@ object SecureRepository {
         val signing = checkNotNull(current.pendingSigningPublicKey)
         val fingerprint = checkNotNull(current.pendingFingerprint)
         val response = if (current.pendingRequiresAcceptance) {
-            encodeBundle(context, ACCEPT_PREFIX, identity(context))
+            check(current.pendingRatchetPublication == null) {
+                "EP3 identity replacement requires a verified reset and new invitation"
+            }
+            encodeBundle(context, LEGACY_COMPACT_ACCEPT_PREFIX, identity(context))
         } else {
             null
         }
@@ -237,6 +306,12 @@ object SecureRepository {
                 signingPublicKey = signing,
                 fingerprint = fingerprint,
                 state = SecurePeerState.ACTIVE_UNVERIFIED,
+                protocol = if (current.pendingRatchetPublication != null) {
+                    SecureProtocol.RATCHET_EP3
+                } else {
+                    SecureProtocol.LEGACY_EP1
+                },
+                ratchetPublication = current.pendingRatchetPublication,
             ),
         )
         response
@@ -264,9 +339,13 @@ object SecureRepository {
         body: String,
         now: Long = System.currentTimeMillis(),
     ): SecureFrameAcceptance {
+        if (body.startsWith(ACCEPT_PREFIX)) {
+            return acceptRatchetAcceptance(context, address, body, now)
+        }
         val (prefix, isAcceptance) = when {
             body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX to false
-            body.startsWith(ACCEPT_PREFIX) -> ACCEPT_PREFIX to true
+            body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) -> LEGACY_COMPACT_INVITE_PREFIX to false
+            body.startsWith(LEGACY_COMPACT_ACCEPT_PREFIX) -> LEGACY_COMPACT_ACCEPT_PREFIX to true
             body.startsWith(LEGACY_INVITE_PREFIX) -> LEGACY_INVITE_PREFIX to false
             body.startsWith(LEGACY_ACCEPT_PREFIX) -> LEGACY_ACCEPT_PREFIX to true
             else -> return SecureFrameAcceptance.NOT_AUTHENTICATED_FRAME
@@ -298,8 +377,66 @@ object SecureRepository {
             signingPublicKey = bundle.signingPublicKey,
             fingerprint = bundle.fingerprint,
             isAcceptance = isAcceptance,
+            ratchetPublication = bundle.ratchetPublication,
         )
         savePeer(context, resolved)
+        return SecureFrameAcceptance.ACCEPTED
+    }
+
+    private fun acceptRatchetAcceptance(
+        context: Context,
+        address: String,
+        body: String,
+        now: Long,
+    ): SecureFrameAcceptance {
+        val current = peer(context, address)
+        if (current.protocol != SecureProtocol.RATCHET_EP3 || current.state != SecurePeerState.INVITE_SENT) {
+            return SecureFrameAcceptance.INVALID
+        }
+        val frame = runCatching {
+            decodeRatchetFrame(body, ACCEPT_PREFIX, hasMessageId = false)
+        }.getOrElse { return SecureFrameAcceptance.INVALID }
+        val signedControl = runCatching {
+            String(
+                SecureRatchetRuntime.decrypt(context, current.address, frame.ciphertext).getOrThrow(),
+                UTF_8,
+            )
+        }.getOrElse { return SecureFrameAcceptance.INVALID }
+        if (!signedControl.startsWith(INTERNAL_ACCEPT_PREFIX)) return SecureFrameAcceptance.INVALID
+        val bundle = runCatching {
+            decodeBundle(signedControl, INTERNAL_ACCEPT_PREFIX)
+        }.getOrElse { return SecureFrameAcceptance.INVALID }
+        if (!SecureRatchetRuntime.acceptanceMatchesPublication(
+                frame.ciphertext,
+                checkNotNull(bundle.ratchetPublication),
+            )
+        ) {
+            return SecureFrameAcceptance.INVALID
+        }
+        val bodyHash = sha256(body.toByteArray(UTF_8)).toHex()
+        val acceptance = SecureReplayRepository.accept(
+            context,
+            AuthenticatedSecureFrame(
+                kind = "ep3-accept",
+                id = bundle.controlId ?: bodyHash,
+                timestamp = bundle.timestamp ?: now,
+                senderFingerprint = bundle.fingerprint,
+                ciphertextSha256 = bodyHash,
+            ),
+            now,
+        )
+        if (acceptance != SecureFrameAcceptance.ACCEPTED) return acceptance
+        savePeer(
+            context,
+            resolveIncomingIdentity(
+                current,
+                bundle.encryptionPublicKey,
+                bundle.signingPublicKey,
+                bundle.fingerprint,
+                isAcceptance = true,
+                ratchetPublication = bundle.ratchetPublication,
+            ),
+        )
         return SecureFrameAcceptance.ACCEPTED
     }
 
@@ -309,9 +446,18 @@ object SecureRepository {
         signingPublicKey: ByteArray,
         fingerprint: String,
         isAcceptance: Boolean,
+        ratchetPublication: ByteArray? = null,
     ): SecurePeer {
         if (current.fingerprint == fingerprint && current.hasKeys) {
-            return current
+            return if (ratchetPublication != null) {
+                current.copy(
+                    state = if (isAcceptance) SecurePeerState.ACTIVE_UNVERIFIED else SecurePeerState.INVITE_RECEIVED,
+                    protocol = SecureProtocol.RATCHET_EP3,
+                    ratchetPublication = ratchetPublication,
+                )
+            } else {
+                current
+            }
         }
         if (current.state == SecurePeerState.IDENTITY_CHANGE_PENDING) {
             return current
@@ -323,6 +469,7 @@ object SecureRepository {
                 pendingSigningPublicKey = signingPublicKey,
                 pendingFingerprint = fingerprint,
                 pendingRequiresAcceptance = !isAcceptance,
+                pendingRatchetPublication = ratchetPublication,
             )
         }
         if (current.hasKeys) {
@@ -338,12 +485,17 @@ object SecureRepository {
             } else {
                 SecurePeerState.INVITE_RECEIVED
             },
+            protocol = if (ratchetPublication != null) SecureProtocol.RATCHET_EP3 else SecureProtocol.LEGACY_EP1,
+            ratchetPublication = ratchetPublication,
         )
     }
 
     fun encryptMessage(context: Context, address: String, plaintext: String): Result<String> = runCatching {
         val current = peer(context, address)
         check(current.canEncrypt) { "Secure Ping is not paired with this contact" }
+        if (current.protocol == SecureProtocol.RATCHET_EP3) {
+            return@runCatching encryptRatchetMessage(context, current, plaintext)
+        }
         val recipientFingerprint = checkNotNull(current.fingerprint)
         val messageId = UUID.randomUUID().toString()
         val timestamp = System.currentTimeMillis()
@@ -378,6 +530,26 @@ object SecureRepository {
             .let(::encode)
     }
 
+    private fun encryptRatchetMessage(
+        context: Context,
+        peer: SecurePeer,
+        plaintext: String,
+    ): String {
+        val messageId = UUID.randomUUID().toString()
+        val payload = JSONObject()
+            .put("v", 3)
+            .put("id", messageId)
+            .put("ts", System.currentTimeMillis())
+            .put("from", localFingerprint(context))
+            .put("to", checkNotNull(peer.fingerprint))
+            .put("text", plaintext)
+            .toString()
+            .toByteArray(UTF_8)
+        val ciphertext = SecureRatchetRuntime.encrypt(context, peer.address, payload).getOrThrow()
+        storeOutgoing(context, messageId, plaintext)
+        return encodeRatchetFrame(RATCHET_MESSAGE_PREFIX, messageId, ciphertext)
+    }
+
     fun encryptAttachmentOffer(
         context: Context,
         address: String,
@@ -385,6 +557,9 @@ object SecureRepository {
     ): Result<String> = runCatching {
         val current = peer(context, address)
         check(current.canEncrypt) { "Secure Ping is not paired with this contact" }
+        check(current.protocol != SecureProtocol.RATCHET_EP3) {
+            "EP3 attachments require the upcoming ratcheted EP3F manifest"
+        }
         val recipientFingerprint = checkNotNull(current.fingerprint)
         val senderFingerprint = identity(context).fingerprint
         val payload = JSONObject()
@@ -436,14 +611,39 @@ object SecureRepository {
         body: String,
         incoming: Boolean,
     ): SecureDecodedMessage? = when {
-        body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_INVITE_PREFIX) -> decodeBundleForDisplay(
+        body.startsWith(RATCHET_MESSAGE_PREFIX) -> runCatching {
+            val frame = decodeRatchetFrame(body, RATCHET_MESSAGE_PREFIX, hasMessageId = true)
+            val text = loadOutgoing(context, checkNotNull(frame.messageId))
+                ?: if (incoming) "⚠ EP3 plaintext unavailable after ratchet commit" else
+                    "Encrypted EP3 Ping sent from another installation"
+            SecureDecodedMessage(
+                text = text,
+                isSecure = true,
+                verified = peer(context, address).state == SecurePeerState.VERIFIED,
+            )
+        }.getOrElse { invalidSecureCapsule() }
+        body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) ||
+            body.startsWith(LEGACY_INVITE_PREFIX) -> decodeBundleForDisplay(
             body = body,
-            prefix = if (body.startsWith(INVITE_PREFIX)) INVITE_PREFIX else LEGACY_INVITE_PREFIX,
+            prefix = when {
+                body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX
+                body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) -> LEGACY_COMPACT_INVITE_PREFIX
+                else -> LEGACY_INVITE_PREFIX
+            },
             validText = if (incoming) "Secure Ping invitation received" else "Secure Ping invitation sent",
         )
-        body.startsWith(ACCEPT_PREFIX) || body.startsWith(LEGACY_ACCEPT_PREFIX) -> decodeBundleForDisplay(
+        body.startsWith(ACCEPT_PREFIX) -> SecureDecodedMessage(
+            text = "EP3 ratchet accepted",
+            isSecure = true,
+            verified = peer(context, address).state == SecurePeerState.VERIFIED,
+        )
+        body.startsWith(LEGACY_COMPACT_ACCEPT_PREFIX) || body.startsWith(LEGACY_ACCEPT_PREFIX) -> decodeBundleForDisplay(
             body = body,
-            prefix = if (body.startsWith(ACCEPT_PREFIX)) ACCEPT_PREFIX else LEGACY_ACCEPT_PREFIX,
+            prefix = if (body.startsWith(LEGACY_COMPACT_ACCEPT_PREFIX)) {
+                LEGACY_COMPACT_ACCEPT_PREFIX
+            } else {
+                LEGACY_ACCEPT_PREFIX
+            },
             validText = "Secure Ping channel accepted",
             verified = peer(context, address).state == SecurePeerState.VERIFIED,
         )
@@ -486,6 +686,11 @@ object SecureRepository {
     fun forgetOutgoingPlaintext(context: Context, body: String) {
         val messageId = runCatching {
             when {
+                body.startsWith(RATCHET_MESSAGE_PREFIX) -> decodeRatchetFrame(
+                    body,
+                    RATCHET_MESSAGE_PREFIX,
+                    hasMessageId = true,
+                ).messageId
                 body.startsWith(MESSAGE_PREFIX) -> parseMessageOuter(body).getString("id")
                 body.startsWith(ATTACHMENT_PREFIX) -> parseAttachmentOuter(body).getString("id")
                 else -> null
@@ -498,20 +703,37 @@ object SecureRepository {
     }
 
     fun notificationText(context: Context, address: String, body: String): String = when {
-        body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_INVITE_PREFIX) -> if (
+        body.startsWith(RATCHET_MESSAGE_PREFIX) -> runCatching {
+            val id = checkNotNull(
+                decodeRatchetFrame(body, RATCHET_MESSAGE_PREFIX, hasMessageId = true).messageId,
+            )
+            checkNotNull(loadOutgoing(context, id))
+            "Ratcheted EP3 Ping received"
+        }.getOrElse { "Unverified EP3 Ping received" }
+        body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) ||
+            body.startsWith(LEGACY_INVITE_PREFIX) -> if (
             isValidBundle(
                 body,
-                if (body.startsWith(INVITE_PREFIX)) INVITE_PREFIX else LEGACY_INVITE_PREFIX,
+                when {
+                    body.startsWith(INVITE_PREFIX) -> INVITE_PREFIX
+                    body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) -> LEGACY_COMPACT_INVITE_PREFIX
+                    else -> LEGACY_INVITE_PREFIX
+                },
             )
         ) {
             "Secure Ping invitation received"
         } else {
             "Invalid Secure Ping invitation received"
         }
-        body.startsWith(ACCEPT_PREFIX) || body.startsWith(LEGACY_ACCEPT_PREFIX) -> if (
+        body.startsWith(ACCEPT_PREFIX) -> "EP3 ratchet accepted"
+        body.startsWith(LEGACY_COMPACT_ACCEPT_PREFIX) || body.startsWith(LEGACY_ACCEPT_PREFIX) -> if (
             isValidBundle(
                 body,
-                if (body.startsWith(ACCEPT_PREFIX)) ACCEPT_PREFIX else LEGACY_ACCEPT_PREFIX,
+                if (body.startsWith(LEGACY_COMPACT_ACCEPT_PREFIX)) {
+                    LEGACY_COMPACT_ACCEPT_PREFIX
+                } else {
+                    LEGACY_ACCEPT_PREFIX
+                },
             )
         ) {
             "Secure Ping channel accepted"
@@ -537,6 +759,12 @@ object SecureRepository {
         body: String,
         now: Long = System.currentTimeMillis(),
     ): SecureFrameAcceptance {
+        if (body.startsWith(RATCHET_MESSAGE_PREFIX)) {
+            val authenticated = runCatching {
+                decryptAndCacheRatchetMessage(context, address, body)
+            }.getOrElse { return SecureFrameAcceptance.INVALID }
+            return SecureReplayRepository.accept(context, authenticated, now)
+        }
         val kind = when {
             body.startsWith(MESSAGE_PREFIX) -> "message"
             body.startsWith(ATTACHMENT_PREFIX) -> "attachment"
@@ -564,6 +792,37 @@ object SecureRepository {
             )
         }.getOrElse { return SecureFrameAcceptance.INVALID }
         return SecureReplayRepository.accept(context, authenticated, now)
+    }
+
+    private fun decryptAndCacheRatchetMessage(
+        context: Context,
+        address: String,
+        body: String,
+    ): AuthenticatedSecureFrame {
+        val current = peer(context, address)
+        check(current.protocol == SecureProtocol.RATCHET_EP3 && current.canEncrypt) {
+            "No verified EP3 session for sender"
+        }
+        val frame = decodeRatchetFrame(body, RATCHET_MESSAGE_PREFIX, hasMessageId = true)
+        val messageId = checkNotNull(frame.messageId)
+        val plaintext = SecureRatchetRuntime.decrypt(
+            context,
+            current.address,
+            frame.ciphertext,
+        ).getOrThrow()
+        val payload = JSONObject(String(plaintext, UTF_8))
+        check(payload.getInt("v") == 3)
+        check(payload.getString("id") == messageId)
+        check(payload.getString("from") == current.fingerprint)
+        check(payload.getString("to") == localFingerprint(context))
+        storeOutgoing(context, messageId, payload.getString("text"))
+        return AuthenticatedSecureFrame(
+            kind = "ep3-message",
+            id = messageId,
+            timestamp = payload.getLong("ts"),
+            senderFingerprint = checkNotNull(current.fingerprint),
+            ciphertextSha256 = sha256(frame.ciphertext.payload).toHex(),
+        )
     }
 
     fun decodeAttachmentOffer(
@@ -595,7 +854,17 @@ object SecureRepository {
             peer.fingerprint
         } ?: return null
         val local = localFingerprint(context)
-        val ordered = listOf(local, remote).sorted().joinToString("")
+        val ratchetBinding = if (peer.protocol == SecureProtocol.RATCHET_EP3) {
+            val localPublication = SecureRatchetRuntime.ensureReady(context).getOrNull()?.payload
+                ?: return null
+            val remotePublication = peer.ratchetPublication ?: peer.pendingRatchetPublication ?: return null
+            listOf(sha256(localPublication).toHex(), sha256(remotePublication).toHex())
+                .sorted()
+                .joinToString("")
+        } else {
+            ""
+        }
+        val ordered = listOf(local, remote).sorted().joinToString("") + ratchetBinding
         val digest = sha256(ordered.toByteArray(UTF_8)).take(12)
         return digest.joinToString(" ") { "%02X".format(it) }.chunked(12).joinToString("  ")
     }
@@ -648,6 +917,69 @@ object SecureRepository {
         val outer = JSONObject(String(decode(body.removePrefix(MESSAGE_PREFIX)), UTF_8))
         require(outer.getInt("v") == 1)
         return outer
+    }
+
+    private data class RatchetFrame(
+        val messageId: String?,
+        val ciphertext: ProtocolCiphertext,
+    )
+
+    private fun encodeRatchetFrame(
+        prefix: String,
+        messageId: String?,
+        ciphertext: ProtocolCiphertext,
+    ): String {
+        require(prefix == ACCEPT_PREFIX || prefix == RATCHET_MESSAGE_PREFIX)
+        require(ciphertext.providerId == SecureRatchetRuntime.descriptor.providerId)
+        val idBytes = messageId?.toByteArray(UTF_8) ?: byteArrayOf()
+        require(idBytes.size == 36 || idBytes.isEmpty()) { "Invalid EP3 message ID" }
+        val wire = ByteBuffer.allocate(1 + 1 + 1 + idBytes.size + Int.SIZE_BYTES + ciphertext.payload.size)
+            .order(ByteOrder.BIG_ENDIAN)
+            .put(1)
+            .put(if (ciphertext.kind == ProtocolCiphertextKind.PRE_KEY) 0 else 1)
+            .put(idBytes.size.toByte())
+            .put(idBytes)
+            .putInt(ciphertext.payload.size)
+            .put(ciphertext.payload)
+            .array()
+        return prefix + encode(wire)
+    }
+
+    private fun decodeRatchetFrame(
+        body: String,
+        prefix: String,
+        hasMessageId: Boolean,
+    ): RatchetFrame {
+        require(body.startsWith(prefix))
+        val encoded = body.removePrefix(prefix)
+        require(encoded.length in 1..131_072 && COMPACT_CONTROL_BASE64.matches(encoded)) {
+            "Invalid EP3 frame encoding"
+        }
+        val buffer = ByteBuffer.wrap(decode(encoded)).order(ByteOrder.BIG_ENDIAN)
+        require(buffer.remaining() >= 1 + 1 + 1 + Int.SIZE_BYTES) { "Truncated EP3 frame" }
+        require(buffer.get().toInt() == 1) { "Unsupported EP3 frame" }
+        val kind = when (buffer.get().toInt()) {
+            0 -> ProtocolCiphertextKind.PRE_KEY
+            1 -> ProtocolCiphertextKind.SESSION
+            else -> error("Unsupported EP3 ciphertext kind")
+        }
+        val idSize = buffer.get().toInt() and 0xff
+        require(idSize == if (hasMessageId) 36 else 0) { "Invalid EP3 message ID length" }
+        require(buffer.remaining() >= idSize + Int.SIZE_BYTES) { "Truncated EP3 frame" }
+        val messageId = if (idSize == 0) null else ByteArray(idSize).also(buffer::get).toString(UTF_8)
+        if (messageId != null) UUID.fromString(messageId)
+        val ciphertextSize = buffer.int
+        require(ciphertextSize in 1..131_072 && buffer.remaining() == ciphertextSize) {
+            "Invalid EP3 ciphertext length"
+        }
+        return RatchetFrame(
+            messageId,
+            ProtocolCiphertext(
+                SecureRatchetRuntime.descriptor.providerId,
+                kind,
+                ByteArray(ciphertextSize).also(buffer::get),
+            ),
+        )
     }
 
     private fun parseAttachmentOuter(body: String): JSONObject {
@@ -738,6 +1070,7 @@ object SecureRepository {
         val fingerprint: String,
         val timestamp: Long? = null,
         val controlId: String? = null,
+        val ratchetPublication: ByteArray? = null,
     )
 
     private fun identity(context: Context): IdentityBundle {
@@ -759,16 +1092,24 @@ object SecureRepository {
         timestamp: Long = System.currentTimeMillis(),
         controlId: ByteArray = ByteArray(CONTROL_ID_BYTES).also(SecureRandom()::nextBytes),
     ): String {
-        require(prefix == INVITE_PREFIX || prefix == ACCEPT_PREFIX)
+        require(
+            prefix == INVITE_PREFIX || prefix == INTERNAL_ACCEPT_PREFIX ||
+                prefix == LEGACY_COMPACT_INVITE_PREFIX || prefix == LEGACY_COMPACT_ACCEPT_PREFIX,
+        )
         require(controlId.size == CONTROL_ID_BYTES)
+        val ratchetPublication = bundle.ratchetPublication
+        if (ratchetPublication != null) {
+            require(ratchetPublication.size == 164) { "Invalid EP3 publication" }
+        }
         val encryption = compactPublicKey(bundle.encryptionPublicKey, HPKE_PUBLIC_TYPE_URL)
         val signing = compactPublicKey(bundle.signingPublicKey, ED25519_PUBLIC_TYPE_URL)
         val unsigned = ByteBuffer.allocate(
             1 + Long.SIZE_BYTES + CONTROL_ID_BYTES +
                 Int.SIZE_BYTES + Short.SIZE_BYTES + encryption.value.size +
-                Int.SIZE_BYTES + Short.SIZE_BYTES + signing.value.size,
+                Int.SIZE_BYTES + Short.SIZE_BYTES + signing.value.size +
+                if (ratchetPublication == null) 0 else Short.SIZE_BYTES + ratchetPublication.size,
         ).order(ByteOrder.BIG_ENDIAN)
-            .put(3)
+            .put(if (ratchetPublication == null) 3 else 4)
             .putLong(timestamp)
             .put(controlId)
             .putInt(encryption.keyId)
@@ -777,6 +1118,12 @@ object SecureRepository {
             .putInt(signing.keyId)
             .putShort(signing.value.size.toShort())
             .put(signing.value)
+            .apply {
+                if (ratchetPublication != null) {
+                    putShort(ratchetPublication.size.toShort())
+                    put(ratchetPublication)
+                }
+            }
             .array()
         val signature = signingKeyset(context).getPrimitive(PublicKeySign::class.java).sign(unsigned)
         val wire = ByteBuffer.allocate(unsigned.size + Short.SIZE_BYTES + signature.size)
@@ -789,7 +1136,12 @@ object SecureRepository {
     }
 
     private fun decodeBundle(body: String, prefix: String): IdentityBundle = when (prefix) {
-        INVITE_PREFIX, ACCEPT_PREFIX -> decodeCompactBundle(body.removePrefix(prefix))
+        INVITE_PREFIX, INTERNAL_ACCEPT_PREFIX,
+        -> decodeCompactBundle(body.removePrefix(prefix)).also {
+            require(it.ratchetPublication != null) { "EP3 control has no ratchet publication" }
+        }
+        LEGACY_COMPACT_INVITE_PREFIX, LEGACY_COMPACT_ACCEPT_PREFIX,
+        -> decodeCompactBundle(body.removePrefix(prefix))
         LEGACY_INVITE_PREFIX, LEGACY_ACCEPT_PREFIX -> decodeAndVerifyLegacyBundle(body.removePrefix(prefix))
         else -> error("Unsupported Secure Ping key bundle")
     }
@@ -803,16 +1155,24 @@ object SecureRepository {
         val wire = decode(encoded)
         val buffer = ByteBuffer.wrap(wire).order(ByteOrder.BIG_ENDIAN)
         val version = buffer.get().toInt()
-        require(version == 2 || version == 3) { "Unsupported compact key bundle" }
-        val timestamp = if (version == 3) buffer.long else null
-        val controlIdBytes = if (version == 3) {
+        require(version in 2..4) { "Unsupported compact key bundle" }
+        val timestamp = if (version >= 3) buffer.long else null
+        val controlIdBytes = if (version >= 3) {
             ByteArray(CONTROL_ID_BYTES).also(buffer::get)
         } else {
             null
         }
         val encryption = readCompactPublicKey(buffer, HPKE_PUBLIC_TYPE_URL)
         val signing = readCompactPublicKey(buffer, ED25519_PUBLIC_TYPE_URL)
-        if (version == 3) {
+        val ratchetPublication = if (version == 4) {
+            require(buffer.remaining() >= Short.SIZE_BYTES) { "Missing EP3 publication" }
+            val size = buffer.short.toInt() and 0xffff
+            require(size == 164 && buffer.remaining() >= size) { "Invalid EP3 publication" }
+            ByteArray(size).also(buffer::get)
+        } else {
+            null
+        }
+        if (version >= 3) {
             val signedSize = buffer.position()
             require(buffer.remaining() >= Short.SIZE_BYTES) { "Missing pairing signature" }
             val signatureSize = buffer.short.toInt() and 0xffff
@@ -835,6 +1195,7 @@ object SecureRepository {
             fingerprint(encryption, signing),
             timestamp,
             controlIdBytes?.toHex(),
+            ratchetPublication,
         )
     }
 
@@ -965,6 +1326,9 @@ object SecureRepository {
             .put("ps", peer.pendingSigningPublicKey?.let(::encode).orEmpty())
             .put("pf", peer.pendingFingerprint.orEmpty())
             .put("pa", peer.pendingRequiresAcceptance)
+            .put("protocol", peer.protocol.name)
+            .put("rp", peer.ratchetPublication?.let(::encode).orEmpty())
+            .put("prp", peer.pendingRatchetPublication?.let(::encode).orEmpty())
         context.getSharedPreferences(PEER_PREFS, Context.MODE_PRIVATE)
             .edit()
             .putString(peerKey(peer.address), json.toString())

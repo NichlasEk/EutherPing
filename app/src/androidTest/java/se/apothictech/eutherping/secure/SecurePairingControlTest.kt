@@ -15,7 +15,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class SecurePairingControlTest {
     @Test
-    fun signedControlIsBoundedFreshAndAdmittedOnlyOnce() {
+    fun signedEp3ControlIsBoundedFreshAndAdmittedOnlyOnce() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val suffix = UUID.randomUUID().toString().take(8)
         val outbound = "+46710$suffix"
@@ -23,7 +23,8 @@ class SecurePairingControlTest {
         SecureReplayRepository.clear(context)
         try {
             val wire = SecureRepository.createInvitation(context, outbound).getOrThrow()
-            assertTrue("Pairing control must fit at most two GSM SMS parts", wire.length <= 306)
+            assertTrue(wire.startsWith(SecureRepository.INVITE_PREFIX))
+            assertTrue("EP3 pairing control must remain bounded", wire.length <= 773)
             assertEquals(
                 SecureFrameAcceptance.ACCEPTED,
                 SecureRepository.acceptIncomingControl(context, inbound, wire),
@@ -97,12 +98,13 @@ class SecurePairingControlTest {
     fun legacyCompactV2ControlRemainsReadable() {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val suffix = UUID.randomUUID().toString().take(8)
-        val signedV3 = SecureRepository.createInvitation(context, "+46714$suffix").getOrThrow()
-        val rawV3 = Base64.decode(
-            signedV3.removePrefix(SecureRepository.INVITE_PREFIX),
+        val signedV4 = SecureRepository.createInvitation(context, "+46714$suffix").getOrThrow()
+        val rawV4 = Base64.decode(
+            signedV4.removePrefix(SecureRepository.INVITE_PREFIX),
             Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING,
         )
-        val parser = ByteBuffer.wrap(rawV3).order(ByteOrder.BIG_ENDIAN)
+        val parser = ByteBuffer.wrap(rawV4).order(ByteOrder.BIG_ENDIAN)
+        assertEquals(4, parser.get().toInt())
         parser.position(1 + 8 + 16)
         parser.int
         val encryptionSize = parser.short.toInt() and 0xffff
@@ -110,12 +112,15 @@ class SecurePairingControlTest {
         parser.int
         val signingSize = parser.short.toInt() and 0xffff
         parser.position(parser.position() + signingSize)
+        val legacyKeySectionEnd = parser.position()
+        val publicationSize = parser.short.toInt() and 0xffff
+        parser.position(parser.position() + publicationSize)
         val unsignedSize = parser.position()
         val signatureSize = parser.short.toInt() and 0xffff
-        assertEquals(rawV3.size, unsignedSize + 2 + signatureSize)
-        val keySection = rawV3.copyOfRange(1 + 8 + 16, unsignedSize)
+        assertEquals(rawV4.size, unsignedSize + 2 + signatureSize)
+        val keySection = rawV4.copyOfRange(1 + 8 + 16, legacyKeySectionEnd)
         val rawV2 = byteArrayOf(2) + keySection
-        val legacyV2 = SecureRepository.INVITE_PREFIX + Base64.encodeToString(
+        val legacyV2 = "EP2I:" + Base64.encodeToString(
             rawV2,
             Base64.NO_WRAP or Base64.URL_SAFE or Base64.NO_PADDING,
         )

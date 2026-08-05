@@ -14,14 +14,16 @@ import se.apothictech.eutherping.crypto.SecureProtocolEngine
 import se.apothictech.eutherping.crypto.SecureProtocolProvider
 
 /**
- * Non-shipping Vodozemac provider checkpoint. Native state is opaque to Kotlin
- * and every state transition is committed through [ProtocolStateRepository].
+ * Vodozemac provider used by the explicit EP3 paired-device beta. Native state
+ * is opaque to Kotlin and every state transition is committed through
+ * [ProtocolStateRepository]. The descriptor remains non-production until the
+ * external review and physical-device gates are complete.
  */
 class VodozemacProvider : SecureProtocolProvider {
     override val descriptor = SecureProtocolDescriptor(
         providerId = PROVIDER_ID,
         implementationVersion = VODOZEMAC_VERSION,
-        wireFamily = "EP3-VODO-PROBE",
+        wireFamily = "EP3-VODO-BETA",
         license = "Apache-2.0",
         forwardSecrecy = true,
         postCompromiseSecurity = true,
@@ -37,6 +39,18 @@ class VodozemacProvider : SecureProtocolProvider {
     companion object {
         const val PROVIDER_ID = "vodozemac"
         const val VODOZEMAC_VERSION = "0.10.0"
+
+        fun acceptanceMatchesPublication(
+            ciphertext: ProtocolCiphertext,
+            publication: ProtocolPreKeyPublication,
+        ): Boolean = runCatching {
+            require(ciphertext.providerId == PROVIDER_ID)
+            require(ciphertext.kind == ProtocolCiphertextKind.PRE_KEY)
+            require(publication.providerId == PROVIDER_ID)
+            NativeFrames.preKeySigningKey(ciphertext.payload).contentEquals(
+                NativeFrames.publicationSigningKey(publication.payload),
+            )
+        }.getOrDefault(false)
     }
 }
 

@@ -1,18 +1,17 @@
 # Secure pairing control framing
 
-Status: EutherPing 0.8.8 Secure Beta framing. This document describes the
-current identity-exchange control; it is not the planned ratcheting session
-protocol and does not claim forward secrecy or post-compromise security.
+Status: EutherPing 0.8.12 Ratchet Beta framing. This document describes both
+the retained legacy identity exchange and the EP3 session bootstrap. It does
+not constitute an independent cryptographic review.
 
 ## Transport and binary layout
 
-New invitations retain the `EP2I:` text prefix and acceptances retain `EP2A:`.
-The suffix is URL-safe, unpadded Base64 containing this big-endian version 3
-structure:
+New invitations use `EP3I:`. Their suffix is URL-safe, unpadded Base64 containing
+this big-endian version 4 structure:
 
 | Field | Size | Meaning |
 | --- | ---: | --- |
-| Version | 1 byte | `3` |
+| Version | 1 byte | `4` |
 | Creation time | 8 bytes | Unix epoch milliseconds |
 | Control ID | 16 bytes | Fresh cryptographically random identifier |
 | HPKE key ID | 4 bytes | Tink primary key ID |
@@ -21,18 +20,24 @@ structure:
 | Ed25519 key ID | 4 bytes | Tink primary key ID |
 | Ed25519 value length | 2 bytes | Unsigned length |
 | Ed25519 public value | bounded | Tink Ed25519 public-key protobuf value |
+| Vodozemac publication length | 2 bytes | Exactly 164 bytes in this version |
+| Vodozemac signed pre-key publication | 164 bytes | Opaque provider-owned bytes |
 | Signature length | 2 bytes | Unsigned length, currently Tink-prefixed Ed25519 |
 | Signature | bounded | Signature over every preceding binary field |
 
-The complete text capsule is bounded by instrumentation to at most 306 GSM
-characters, which is at most two 153-character multipart SMS payloads. No
-private key is transported. The fingerprint and safety code are derived from
-the reconstructed HPKE and signing public keysets, not from a claimed value in
-the message.
+The complete Base64 suffix is bounded to 768 characters and can therefore use
+several multipart SMS segments. No private key is transported. The displayed
+EP3 safety code binds both legacy fingerprints and both ratchet-publication
+hashes in stable order.
+
+Acceptance uses `EP3A:` with a bounded binary frame. The acceptor establishes
+an outbound Vodozemac session and encrypts a fresh, signed version 4 `EP3C:`
+identity control as the first PRE_KEY ciphertext. Neither side can send text
+until the new safety code is explicitly verified on both phones.
 
 ## Admission order
 
-For a received version 3 control EutherPing:
+For a received version 4 invitation EutherPing:
 
 1. applies strict Base64 and binary length bounds;
 2. reconstructs and validates the exact expected Tink public-key types;
@@ -42,7 +47,8 @@ For a received version 3 control EutherPing:
 6. admits the `(fingerprint, kind, random control ID, capsule hash)` once through
    the bounded private replay index;
 7. applies the peer-state transition; and
-8. only then permits Android Telephony persistence and local notification.
+8. stores the remote ratchet publication as unverified peer state; and
+9. only then permits Android Telephony persistence and local notification.
 
 Invalid, stale, duplicate, and ID/hash-conflicting controls return before peer
 state and Telephony history are changed. Self-signing prevents an observer from
@@ -53,7 +59,7 @@ quarantined with sending disabled.
 
 ## Legacy behavior
 
-Compact binary version 2 (`EP2I`/`EP2A`) and signed JSON version 1
+Compact binary versions 2 and 3 (`EP2I`/`EP2A`) and signed JSON version 1
 (`EP1I`/`EP1A`) remain readable so existing history and in-flight pairings do
 not become plaintext or silently trusted. Their exact capsule hash is admitted
 once, but neither older format contains an authenticated creation time, so age
@@ -72,4 +78,5 @@ index behavior.
 
 The remaining reviewed-protocol work is specified in
 [`SECURE_PROTOCOL_MIGRATION.md`](SECURE_PROTOCOL_MIGRATION.md). This control
-format must not be extended into a home-grown ratchet.
+The provider, not this framing layer, owns session establishment, encryption,
+decryption, skipped keys, and ratchet state advancement.
