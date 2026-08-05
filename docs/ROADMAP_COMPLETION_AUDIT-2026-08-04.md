@@ -10,12 +10,12 @@ evidence.
 
 | Evidence | Current result |
 | --- | --- |
-| Debug unit tests | Pass for 0.8.9 |
-| Android lint | Pass for 0.8.9 |
-| Debug APK | Builds for 0.8.9 |
-| Minified release APK | Builds successfully for 0.8.9 with R8/resource shrinking |
-| Android instrumentation | 34/34 full-suite pass plus focused 4/4 storage-isolation rerun on Android 11 x86_64 emulator |
-| Installed manifest | Version code 37, version name 0.8.9 |
+| Debug unit tests | 15/15 pass for 0.8.10 |
+| Android lint | Pass for 0.8.10 |
+| Debug APK | Builds and APK Signature Scheme v2 verifies for 0.8.10 |
+| Minified release APK | Builds successfully for 0.8.10 with R8/resource shrinking |
+| Android instrumentation | 35/35 full-suite pass on Android 11 x86_64 emulator, including notification-channel ID and vibration pattern |
+| Installed manifest | Built APK reports version code 38, version name 0.8.10; physical install verification pending |
 | Physical Samsung | Not currently connected; acceptance evidence missing |
 | Physical GrapheneOS | Not currently connected; acceptance evidence missing |
 
@@ -25,7 +25,7 @@ evidence.
 | --- | --- | --- |
 | 1 — biometric Vessel gate | `VesselBiometricGate`, default-on setting, foreground relock state, private Secure notification path, scanner UI, and `VesselBiometricGateTest`. | Implemented and emulator-tested. Real enrolled fingerprint, cancellation, background/re-entry, and Signals-unaffected checks remain required on both physical phones. |
 | 2 — dependable outbox | Provider-backed send states, multipart aggregation, failure classification/details, retry actions, MMS draft retention, subscription preservation, and `SmsDeliveryStatusTest`/MMS instrumentation. | Implemented and emulator-tested. Carrier delivery, APN/mobile-data failure, force-stop reconciliation, and failed-MMS-does-not-block checks remain required on Samsung and GrapheneOS. |
-| 3 — daily convenience | Ordinary RemoteInput reply, per-conversation drafts, bounded global/in-thread search, pin/archive/read/block controls, local delete, forwarding, links, media open/save, and notification privacy modes. Repository and instrumentation tests cover draft persistence and provider controls. | Implementation present. Lock-screen reply, document picker, browser intent, process-death draft recovery, and block/unblock need physical UX acceptance. Secure notifications deliberately reject plaintext quick reply. |
+| 3 — daily convenience | Ordinary RemoteInput reply, per-conversation drafts, bounded global/in-thread search, pin/archive/read/block controls, local delete, forwarding, links, media open/save, notification privacy modes, and a versioned short-short-long incoming-message vibration channel with a direct Android settings link. Repository and instrumentation tests cover draft persistence, provider controls, and channel defaults. | Implementation present. Lock-screen reply, document picker, browser intent, process-death draft recovery, block/unblock, and vibration feel on both physical phones need UX acceptance. Secure notifications deliberately reject plaintext quick reply. |
 | 4 — Samsung smoothness | Bounded provider paging, lazy MMS decode/cache, lifecycle refresh, Baseline Profile journeys, local timing/jank diagnostics, and secret-exclusion tests. | Implementation present. The plan's before/after cold/warm timings and scroll-jank comparison on the target Samsung and GrapheneOS are missing; smoothness is not proven by the emulator. |
 | 5 — multi-SIM/group MMS | Explicit per-conversation SIM selection, unavailable-SIM fail-closed behavior, subscription labels, participant-based group identity/reply-all, and subscription/group provider tests. | Implementation present. Real dual-SIM choice, group send/receive, roaming, Wi-Fi calling, mobile-data-off, failure/retry, and carrier interoperability matrix are missing. |
 | 6 — Secure storage and framing hardening | Dedicated keyset/peer/vault/replay/draft-index stores; encrypted attachment directories; explicit in-memory image preview; temporary open/save cleanup; signed fresh pairing; replay/stale/conflict rejection; fail-closed identity quarantine. Instrumentation covers these boundaries, including legacy draft-index migration. | Current beta hardening is implemented and tested. Carrier metadata and encrypted capsules necessarily remain in Telephony; no Secure plaintext enters ordinary message/draft/index storage. |
@@ -33,7 +33,7 @@ evidence.
 
 ## Remaining completion path
 
-1. Publish 0.8.9 only after its release APK, checksum, public download, server
+1. Publish 0.8.10 only after its release APK, checksum, public download, server
    route, and clean pushed commits are verified.
 2. Run the documented Samsung/GrapheneOS performance, biometric, outbox,
    multi-SIM, group-MMS, and Secure attachment matrices with both phones

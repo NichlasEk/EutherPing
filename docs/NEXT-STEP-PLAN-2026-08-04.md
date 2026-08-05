@@ -202,3 +202,9 @@ or protocol gates are maintained in
   migrate once and are deleted, and ordinary draft clearing no longer touches
   Secure storage. Instrumentation inspects all three stores and proves the
   plaintext marker enters none of their persisted values.
+- `0.8.10`: SMS, MMS, and private Vessel alerts share a recognizable
+  short-short-long EutherPing vibration on a versioned Android notification
+  channel. System and privacy links to the channel settings; Android silent,
+  vibration, Do Not Disturb, device, and user overrides remain authoritative.
+  Instrumentation verifies the shipped channel ID and pattern. Physical feel
+  and suppression behavior remain to be accepted on Samsung and GrapheneOS.

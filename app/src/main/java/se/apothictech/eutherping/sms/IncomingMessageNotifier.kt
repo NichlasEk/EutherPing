@@ -20,10 +20,29 @@ import se.apothictech.eutherping.R
 import se.apothictech.eutherping.contacts.ContactRepository
 
 object IncomingMessageNotifier {
-    internal const val CHANNEL_ID = "incoming_sms"
+    // Notification-channel behavior is immutable after first creation. Keep the
+    // version in the ID whenever the EutherPing signature changes so upgrades
+    // receive the new default while Android still gives the user final control.
+    internal const val CHANNEL_ID = "incoming_messages_v2"
+    internal val VIBRATION_PATTERN = longArrayOf(0L, 90L, 80L, 90L, 180L, 220L)
     internal const val EXTRA_THREAD_ID = "thread_id"
     internal const val EXTRA_RECIPIENTS = "recipients"
     internal const val EXTRA_SUBSCRIPTION_ID = "subscription_id"
+
+    internal fun ensureChannel(context: Context): NotificationChannel {
+        val manager = context.getSystemService(NotificationManager::class.java)
+        val channel = NotificationChannel(
+            CHANNEL_ID,
+            "Incoming messages",
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = "Incoming SMS, MMS and private Vessel alerts with the EutherPing vibration"
+            enableVibration(true)
+            vibrationPattern = VIBRATION_PATTERN
+        }
+        manager.createNotificationChannel(channel)
+        return manager.getNotificationChannel(CHANNEL_ID) ?: channel
+    }
 
     fun show(
         context: Context,
@@ -55,16 +74,7 @@ object IncomingMessageNotifier {
             privacy == NotificationPrivacy.PRIVATE -> "Open EutherPing to read"
             else -> body
         }
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(
-            NotificationChannel(
-                CHANNEL_ID,
-                "Incoming messages",
-                NotificationManager.IMPORTANCE_HIGH,
-            ).apply {
-                description = "Incoming SMS and MMS received by EutherPing"
-            },
-        )
+        ensureChannel(context)
         val openIntent = Intent(context, MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             data = "sms:$address".toUri()
@@ -158,6 +168,7 @@ object IncomingMessageNotifier {
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) return
+        ensureChannel(context)
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_eutherping)
             .setContentTitle("Reply not sent")

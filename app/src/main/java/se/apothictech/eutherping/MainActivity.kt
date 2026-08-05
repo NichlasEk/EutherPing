@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.provider.Telephony
 import android.util.Log
 import android.widget.Toast
@@ -146,6 +147,7 @@ import se.apothictech.eutherping.secure.SecureAttachmentDescriptor
 import se.apothictech.eutherping.secure.SecureAttachmentRepository
 import se.apothictech.eutherping.secure.BluetoothAttachmentTransport
 import se.apothictech.eutherping.secure.SecureRepository
+import se.apothictech.eutherping.sms.IncomingMessageNotifier
 import se.apothictech.eutherping.sms.CarrierMmsAttachment
 import se.apothictech.eutherping.sms.CarrierMmsRepository
 import se.apothictech.eutherping.sms.CarrierSubscription
@@ -3917,6 +3919,23 @@ private fun SystemScreen(
             onPrivacyChange = { selected ->
                 notificationPrivacy = selected
                 ConversationControlsRepository.setNotificationPrivacy(context, selected)
+            },
+        )
+        SystemCard(
+            "EUTHERPING VIBRATION",
+            "SHORT · SHORT · LONG",
+            Toxic,
+            "Incoming SMS, MMS and private Vessel alerts use a recognizable vibration. " +
+                "Android's vibration, silent and Do Not Disturb settings always remain in control.",
+            actionLabel = "ANDROID CHANNEL SETTINGS",
+            onAction = {
+                IncomingMessageNotifier.ensureChannel(context)
+                context.startActivity(
+                    Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        putExtra(Settings.EXTRA_CHANNEL_ID, IncomingMessageNotifier.CHANNEL_ID)
+                    },
+                )
             },
         )
         val biometricAvailability = remember(bluetoothRevision) {
