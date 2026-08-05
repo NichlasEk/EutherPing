@@ -1,5 +1,13 @@
 # EutherPing
 
+Version 0.8.11 includes the Apache-2.0 Vodozemac provider and encrypted
+`secure_sessions_v3` store in every app build. App startup prepares one signed
+ratchet pre-key in the background and keeps its opaque account state behind
+Android Keystore and `AtomicFile`; there is no runtime opt-in switch. This is
+the always-on local protocol foundation, not a silent conversation migration:
+EP1 remains the wire format until the authenticated EP3 handshake, safety-code
+binding, two-phone interop, and external review gates are complete.
+
 Version 0.8.10 gives incoming SMS, MMS, and private Vessel notifications a
 recognizable short-short-long EutherPing vibration. The versioned Android
 notification channel makes the new default effective on upgraded phones, while
@@ -93,7 +101,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.10`; the detailed `0.8.0` overview below describes
+The current release is `0.8.11`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:

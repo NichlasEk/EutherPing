@@ -1,6 +1,6 @@
 # Secure protocol provider architecture
 
-Status: non-shipping architecture checkpoint, 2026-08-05.
+Status: always-included local runtime checkpoint, 2026-08-05.
 
 ```
 EutherPing app
@@ -27,14 +27,16 @@ provider, EP1, ordinary SMS, or MMS.
 is measurement scaffolding, not an interoperable EutherPing protocol. The
 shipping `app` module deliberately has no dependency on it.
 
-`crypto-vodozemac` implements `SecureProtocolProvider` as an opt-in,
-non-shipping checkpoint. Kotlin sees only opaque account/session bytes through
-a bounded JNI frame; every key generation, session setup, encrypt, and decrypt
-operation executes inside one `ProtocolStateRepository` transaction. Signed
+`crypto-vodozemac` implements `SecureProtocolProvider` as the always-included
+local runtime from EutherPing 0.8.11. Kotlin sees only opaque account/session
+bytes through a bounded JNI frame; every key generation, session setup,
+encrypt, and decrypt operation executes inside one `ProtocolStateRepository`
+transaction. Signed
 pre-key frames bind the Olm Curve25519 identity to the Ed25519 signing identity,
-and provider/kind/identity mismatch fails before state commits. The present
-tests use copy-on-write memory repositories; advancing it requires the durable
-storage and production gates in
+and provider/kind/identity mismatch fails before state commits. Provider tests
+cover both copy-on-write memory repositories and real Keystore-backed Android
+repositories. App startup now prepares and reuses one signed publication, while
+carrier use still requires the production gates in
 [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md).
 
 ## State boundary

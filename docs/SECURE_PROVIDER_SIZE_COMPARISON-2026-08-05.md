@@ -8,9 +8,10 @@ only `libsignal-protocol` can be much smaller, but it would make EutherPing the
 owner of an unsupported native API bridge, an exact nightly Rust toolchain, and
 AGPL distribution compliance.
 
-Vodozemac `0.10.0` is implemented as an isolated provider checkpoint. It is
-not approved for production yet. The shipping `app`
-module has no dependency on either probe and its behavior and APK are unchanged.
+Vodozemac `0.10.0` is implemented as the always-included local provider from
+EutherPing 0.8.11. It is not approved for EP3 carrier traffic yet. The shipping
+`app` depends on Vodozemac and its encrypted Android state store, while the
+libsignal probe remains excluded.
 
 ## Like-for-like probes
 
@@ -51,10 +52,9 @@ already measured by the official Java probe.
 
 ## Vodozemac Android evidence
 
-The opt-in `crypto-vodozemac` module pins the exact Cargo dependency graph and
-is excluded from normal Gradle configuration unless
-`-PincludeCryptoVodoProbe=true` is supplied. On Android 11 x86_64, the provider
-passed 2/2 instrumentation tests. Its current signed frame/state measurements
+The always-included `crypto-vodozemac` module pins the exact Cargo dependency
+graph. On Android 11 x86_64, the provider passed its instrumentation suite and
+the app-level startup/reload test. Its current signed frame/state measurements
 are:
 
 ```
@@ -66,8 +66,8 @@ Bob session state       1487 bytes
 ```
 
 The arm64 library is stripped and its ELF load segments are compatible with
-16 KiB Android pages. Normal EutherPing builds do not run Cargo and do not
-package this library.
+16 KiB Android pages. Normal EutherPing builds now run the pinned native build
+and package this library.
 
 ## Why Vodozemac advances
 
@@ -93,10 +93,9 @@ under `/opt/android-ndk`:
 pacman -Q android-ndk
 ```
 
-`cargo-ndk` was kept in an isolated Rust environment because the Arch package
-depends on `rustup` and would replace the machine's existing system `rust` and
-`cargo` packages. This is a development-tool decision, not an app runtime
-dependency.
+The verified `cargo-ndk` remains in the isolated build environment because a
+system-wide copy requires an interactive sudo prompt. Clean source builds need
+`cargo-ndk` on `PATH`; it is a development tool, not an app runtime dependency.
 
 ## Next production gates
 

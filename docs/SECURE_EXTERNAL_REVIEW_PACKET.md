@@ -62,7 +62,8 @@ state handling, not infer safety from the primitives alone.
 - The isolated Vodozemac provider's signed key publication, signed initial
   identity binding, bidirectional/out-of-order ratchet, opaque reload, replay
   rejection, identity-change rejection, and copy-on-write rollback tests on
-  Android 11. This module is not linked into the shipping app.
+  Android 11. From 0.8.11 it is linked into the shipping app and initializes
+  local state, but it is not yet selected for carrier messages.
 - Real Android Keystore/no-backup persistence, atomic rollback, simulated commit
   failure, ciphertext tamper, cross-identity swap, repository re-instantiation,
   and persistent Alice/Bob continuation tests for `secure_sessions_v3`.

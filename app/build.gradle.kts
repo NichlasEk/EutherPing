@@ -13,8 +13,8 @@ android {
         applicationId = "se.apothictech.eutherping"
         minSdk = 28
         targetSdk = 36
-        versionCode = 38
-        versionName = "0.8.10"
+        versionCode = 39
+        versionName = "0.8.11"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -61,6 +61,8 @@ dependencies {
         isTransitive = false
     }
     implementation("com.google.crypto.tink:tink-android:1.23.0")
+    implementation(project(":crypto-storage-android"))
+    implementation(project(":crypto-vodozemac"))
     implementation("androidx.metrics:metrics-performance:1.0.0")
     implementation("androidx.profileinstaller:profileinstaller:1.4.1")
 

@@ -3,9 +3,10 @@
 ## Outcome
 
 `crypto-storage-android` is a real Android implementation of
-`ProtocolStateRepository`, not an in-memory format mock. It is production-shaped
-but remains opt-in with the Vodozemac checkpoint; the shipping `app` does not
-yet depend on it and no EP3 carrier traffic is enabled.
+`ProtocolStateRepository`, not an in-memory format mock. From EutherPing 0.8.11
+the shipping `app` always includes it and prepares the local Vodozemac account
+and signed pre-key publication during process startup. No EP3 carrier traffic
+or existing-conversation migration is enabled yet.
 
 ## Storage boundary
 
@@ -58,16 +59,23 @@ reopen from Keystore-protected files, and continue bidirectional ratcheted
 traffic. The other cases retain out-of-order, replay, signature, identity,
 silent-reset, provider mismatch, and copy-on-write rollback coverage.
 
+An app-level instrumentation test starts the same always-on runtime used by the
+shipping `Application`, proves the encrypted state file is created without
+exposing the pre-key byte sequence, clears the process cache, and reloads the
+exact same publication from that authenticated container instead of rotating
+identity at restart.
+
 ## Remaining reality gates
 
 - A new repository instance exercises the process-persistence boundary, but an
   actual force-stop/reboot sequence still needs physical-device evidence.
-- The module is deliberately not linked to the shipping app until EP3 framing,
-  safety-code binding, reset UX, and authenticated prekey delivery are frozen.
+- The module is linked and initialized, but no session is selected for carrier
+  traffic until EP3 framing, safety-code binding, reset UX, and authenticated
+  pre-key delivery are frozen.
 - The repository serializes transitions inside one app process. EutherPing must
   keep session mutation in that process or add an explicit cross-process lock.
 - Samsung and GrapheneOS must prove Keystore availability, reboot behavior,
   delayed/out-of-order delivery, identity replacement, state loss, and storage
-  inspection before an opt-in `RATCHET BETA` ships.
+  inspection before ratcheted carrier traffic ships.
 - External review remains mandatory before production activation or removal of
   the Secure Beta label.
