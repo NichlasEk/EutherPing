@@ -78,9 +78,6 @@ object SecureAttachmentRepository {
             check(peer.canEncrypt) {
                 "Verify the vessel before sending a file"
             }
-            check(peer.protocol != SecureProtocol.RATCHET_EP3) {
-                "EP3 attachments are locked until the ratcheted EP3F manifest is ready"
-            }
             val id = UUID.randomUUID().toString()
             val metadata = readMetadata(context, uri)
             require(metadata.size == null || metadata.size in 0..MAX_FILE_BYTES) {

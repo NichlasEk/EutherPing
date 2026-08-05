@@ -103,6 +103,13 @@ class VodozemacProviderTest {
         assertTrue(reply.payload.size <= 100)
         assertArrayEquals("reply".encodeToByteArray(), alice.decrypt(bobAddress, reply))
 
+        val attachmentManifest = """
+            {"v":3,"kind":"file","id":"00000000-0000-4000-8000-000000000001","name":"photo.jpg"}
+        """.trimIndent().encodeToByteArray()
+        val attachmentOffer = alice.encrypt(bobAddress, attachmentManifest)
+        assertEquals(ProtocolCiphertextKind.SESSION, attachmentOffer.kind)
+        assertArrayEquals(attachmentManifest, bob.decrypt(aliceAddress, attachmentOffer))
+
         val second = alice.encrypt(bobAddress, "second".encodeToByteArray())
         val third = alice.encrypt(bobAddress, "third".encodeToByteArray())
         assertArrayEquals("third".encodeToByteArray(), bob.decrypt(aliceAddress, third))

@@ -1,6 +1,6 @@
 # Secure protocol provider architecture
 
-Status: EutherPing 0.8.12 paired-device Ratchet Beta, 2026-08-05.
+Status: EutherPing 0.8.13 paired-device Ratchet Beta, 2026-08-05.
 
 ```
 EutherPing app
@@ -36,7 +36,8 @@ pre-key frames bind the Olm Curve25519 identity to the Ed25519 signing identity,
 and provider/kind/identity mismatch fails before state commits. Provider tests
 cover both copy-on-write memory repositories and real Keystore-backed Android
 repositories. App startup now prepares and reuses one signed publication, while
-0.8.12 uses it only for explicitly paired and re-verified EP3 text; production
+0.8.13 uses it only for explicitly paired and re-verified EP3 text and attachment
+manifests; production
 use still requires the remaining gates in
 [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md).
 

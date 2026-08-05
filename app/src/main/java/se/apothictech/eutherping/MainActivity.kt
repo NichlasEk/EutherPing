@@ -2267,8 +2267,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 secureOnly = secureLane,
                 enabled = !secureLane || securePeer?.canEncrypt == true,
                 attachmentBusy = attachmentBusy,
-                attachmentEnabled = isRealSms &&
-                    (!secureLane || securePeer?.protocol != SecureProtocol.RATCHET_EP3),
+                attachmentEnabled = isRealSms,
                 carrierMmsUri = pendingCarrierMmsUri.takeUnless { secureLane },
                 carrierSubscriptions = carrierSubscriptions,
                 selectedSubscriptionId = selectedSubscriptionId,
@@ -3415,7 +3414,7 @@ private fun SecurePairingCard(
                     SecurePeerState.INVITE_RECEIVED -> "Accept to return this phone's public keys and enable encrypted SMS capsules."
                     SecurePeerState.ACTIVE_UNVERIFIED -> "Compare this safety code on both phones before marking the identity verified."
                     SecurePeerState.VERIFIED -> if (protocol == SecureProtocol.RATCHET_EP3) {
-                        "Text messages ratchet through Vodozemac over carrier SMS. EP3 attachments remain locked."
+                        "Text and attachment manifests ratchet through Vodozemac. Files stay encrypted over direct Wi-Fi or Bluetooth."
                     } else {
                         "Legacy HPKE remains readable. Upgrade explicitly to start a new EP3 ratchet session."
                     }

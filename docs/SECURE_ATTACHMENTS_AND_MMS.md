@@ -2,7 +2,7 @@
 
 ## Current state
 
-EutherPing 0.8.7 implements encrypted images and files inside verified `Vessels`. A signed, recipient-encrypted `EP1F` offer travels over SMS while the same AES-256-GCM ciphertext payload travels over direct Wi-Fi or authenticated Bluetooth Classic. Bluetooth is limited to devices already paired in Android settings and requires optional Nearby devices access on Android 12+. The sender authenticates the downloader's Vessel signing key on either transport, offers expire after 24 hours, and no file transport falls back to plaintext MMS. Files are limited to 256 MB in this beta.
+EutherPing 0.8.13 implements encrypted images and files inside verified `Vessels`. New EP3 sessions ratchet the complete manifest as `EP3F`; retained legacy sessions and history use signed, recipient-encrypted `EP1F`. The same AES-256-GCM ciphertext payload travels over direct Wi-Fi or authenticated Bluetooth Classic. Bluetooth is limited to devices already paired in Android settings and requires optional Nearby devices access on Android 12+. The sender authenticates the downloader's Vessel signing key on either transport, offers expire after 24 hours, and no file transport falls back to EP1F, plaintext MMS, or another transport lane. Files are limited to 256 MB in this beta.
 
 `Signals` also implements a separate carrier image-MMS beta: one selected image plus an optional caption, outgoing PDU persistence and system upload, incoming WAP Push download, provider persistence, image history, group reply-all, explicit per-conversation SIM selection, and app-level retry. Carrier MMS is explicitly labelled as ordinary and unencrypted. Video/audio, broad physical carrier testing, automatic secure peer discovery, resumable secure chunks, background foreground-service hosting, and an optional encrypted relay remain later milestones.
 
@@ -14,11 +14,11 @@ EutherPing 0.8.7 implements encrypted images and files inside verified `Vessels`
 
 ## Secure attachment envelope
 
-Do not invent new cryptographic primitives. Version 0.8.7 generates a fresh random 256-bit content key and 96-bit nonce for every attachment and streams the file through standard AES-256-GCM. It HPKE-encrypts that key and the complete signed manifest to the verified Vessel identity. The manifest binds ciphertext and plaintext hashes and sizes, media type, safe filename, sender and recipient fingerprints, message identifier, endpoint, enabled transports, and protocol version.
+Do not invent new cryptographic primitives. Version 0.8.13 generates a fresh random 256-bit content key and 96-bit nonce for every attachment and streams the file through standard AES-256-GCM. In EP3 it encrypts the key and complete manifest as the next Vodozemac session message. The manifest binds ciphertext and plaintext hashes and sizes, media type, safe filename, sender and recipient fingerprints, message identifier, endpoint, enabled transports, and protocol version. The outer `EP3F` UUID must match the authenticated inner UUID. Existing EP1F remains readable but is never selected after an EP3 upgrade.
 
-The receiver verifies the signed manifest and recipient identity before accepting bytes, signs the direct request with its Vessel key, streams ciphertext into private app storage, verifies the ciphertext hash, and deletes partial or failed transfers. Plain filenames, thumbnails, keys, hashes, and media metadata are not sent outside the HPKE-encrypted envelope. A verified `image/*` offer remains encrypted until the user presses `DECRYPT // SHOW IMAGE`; AEAD authentication and bounded decoding then happen in memory without a plaintext preview file. Opening or saving a verified download performs complete authentication and creates a private temporary copy only for the requested operation; view copies are cleared on the next app start and scheduled for deletion after ten minutes.
+The receiver admits and decrypts the ratcheted manifest before accepting bytes, signs the direct request with its Vessel signing key, streams ciphertext into private app storage, verifies the ciphertext hash, and deletes partial or failed transfers. Plain filenames, thumbnails, keys, hashes, and media metadata are not sent outside the EP3 ciphertext envelope. A verified `image/*` offer remains encrypted until the user presses `DECRYPT // SHOW IMAGE`; AEAD authentication and bounded decoding then happen in memory without a plaintext preview file. Opening or saving a verified download performs complete authentication and creates a private temporary copy only for the requested operation; view copies are cleared on the next app start and scheduled for deletion after ten minutes.
 
-This is still product protocol work and requires external review, protocol test vectors, broader malformed-input tests, cancellation, storage-pressure behavior, and migration to a reviewed ratcheting session protocol before a stronger security claim is made. Authenticated frame replay/staleness limits and fail-closed identity-change quarantine are implemented in the current beta.
+This remains product protocol work and requires external review, broader malformed-input tests, cancellation, storage-pressure behavior, and physical two-phone transport evidence before a stronger security claim is made. Ratchet-provider Alice/Bob tests, app-level EP3I/EP3A/EP3F integration, authenticated frame replay/staleness limits, and fail-closed identity-change quarantine are implemented in the current beta.
 
 ## Transport order
 
@@ -30,7 +30,7 @@ This is still product protocol work and requires external review, protocol test 
 
 ### Bluetooth physical acceptance test
 
-1. Install the same 0.7.0 build on both phones, open `System`, grant `Nearby devices`, and pair the phones in Android Bluetooth settings.
+1. Install the same 0.8.13 build on both phones, open `System`, grant `Nearby devices`, and pair the phones in Android Bluetooth settings.
 2. Return to EutherPing and confirm `BLUETOOTH VESSEL // READY` on both phones.
 3. Disable Wi-Fi on both phones, keep the sender app available, and offer a small file from a verified Vessel.
 4. Confirm the bubble says `BLUETOOTH`, download it on the receiver, and open the verified plaintext.

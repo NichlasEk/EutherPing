@@ -1,13 +1,19 @@
 # EutherPing
 
-Version 0.8.12 enables the first explicit EP3 Ratchet Beta between two phones.
+Version 0.8.13 adds ratcheted EP3F attachment manifests to the working EP3
+paired-device beta. Attachment names, sizes, hashes, AES-GCM content keys,
+nonces, transport tokens, and Wi-Fi/Bluetooth endpoints now travel only inside
+the verified Vodozemac session. The file itself remains AES-256-GCM ciphertext
+in private storage and throughout direct transfer. Images retain explicit,
+in-memory-on-demand decryption, and EP3 never falls back to EP1F or MMS.
+
+Version 0.8.12 enabled the first explicit EP3 Ratchet Beta between two phones.
 New Vessel invitations carry a Tink-signed Vodozemac pre-key, acceptance is the
 first encrypted pre-key message, and verified text messages use Vodozemac's Olm
 ratchet over carrier SMS. Both phones must run 0.8.12, accept the new invitation,
 compare the new safety code, and verify it before EP3 sending unlocks. Upgraded
 sessions never fall back to legacy EP1, ordinary SMS, or MMS. Existing EP1
-history remains readable. EP3 attachments are deliberately locked until an
-authenticated ratcheted EP3F manifest exists. This remains a paired-device beta:
+history remains readable. This remains a paired-device beta:
 external cryptographic integration review and physical Samsung/GrapheneOS tests
 are release gates, and clearing app data requires pairing again.
 
@@ -114,7 +120,7 @@ Outgoing bubbles now show provider-backed `SENDING`, `SENT`, `DELIVERED`, or
 failed SMS or MMS can be retried from its message actions with locally derived
 carrier, service, SIM, APN, or MMS HTTP guidance.
 
-The current release is `0.8.12`; the detailed `0.8.0` overview below describes
+The current release is `0.8.13`; the detailed `0.8.0` overview below describes
 the carrier and Secure Vessels baseline retained by this release.
 
 EutherPing is an original Android messaging project with two deliberately distinct lanes:
@@ -139,7 +145,7 @@ This is deliberately labelled **Ratchet Beta**. EP3 text has per-message ratchet
 5. Compare the safety code shown on both phones. If every group matches, tap `CODES MATCH — VERIFY` on both.
 6. Send a short test message in the vessel conversation. The composer remains locked until verification is complete.
 
-Version 0.8.12 requires both phones for a new EP3 pairing and its signed pre-key invitation can span several carrier SMS parts. Existing v2/v1 pairing history remains readable and a verified legacy Vessel offers an explicit EP3 upgrade. Equivalent local/international number formats such as `070…` and `+4670…` are matched. Encrypted messages can span several SMS, so carrier charges may apply. Secure mode never silently falls back to plaintext SMS or MMS. EP3 attachments are currently disabled; legacy verified attachments keep their prior direct-transfer behavior.
+Version 0.8.13 requires both phones for a new EP3 pairing and its signed pre-key invitation can span several carrier SMS parts. Existing v2/v1 pairing history remains readable and a verified legacy Vessel offers an explicit EP3 upgrade. Equivalent local/international number formats such as `070…` and `+4670…` are matched. Encrypted messages and EP3F manifests can span several SMS, so carrier charges may apply. Secure mode never silently falls back to plaintext SMS, MMS, or EP1F. EP3 attachments use the existing encrypted direct Wi-Fi/Bluetooth payload transfer only after the ratcheted manifest is admitted.
 
 In a verified Vessel, the attachment button encrypts a selected file locally with AES-256-GCM, signs and HPKE-encrypts its key and manifest for the recipient, and sends that offer as Secure Ping SMS capsules. The same encrypted payload transfers over direct Wi-Fi first or authenticated Bluetooth Classic between phones already paired in Android settings. Bluetooth never carries ordinary SMS or decrypted text. The sender must keep EutherPing available, offers expire after 24 hours, and this beta limits files to 256 MB. The receiving phone verifies the Vessel identity, request proof and ciphertext hash while downloading; AEAD authentication, plaintext size, and plaintext hash are verified only when the user asks to decrypt. Verified images are shown inline only after that explicit action and only in their separate Vessel conversation; other files retain an explicit open action.
 
@@ -155,7 +161,7 @@ The debug APK is written to `app/build/outputs/apk/debug/app-debug.apk`.
 
 ## Privacy
 
-EutherPing 0.8.12 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text plaintext and Vessel drafts are stored in a Keystore-protected local vault with a separate Secure draft index so they never enter the ordinary draft store. EP3 ratchet account/session state is serialized by Vodozemac and envelope-encrypted under a dedicated Android Keystore key before atomic persistence. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally, use an Android-controlled vibration channel, and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
+EutherPing 0.8.13 has no accounts, analytics, ads, telemetry, or remote service. Network and optional Nearby devices permissions are used only for direct encrypted attachment transfer and Android's carrier MMS transport. Bluetooth access is limited to already paired devices and does not scan location. SMS and MMS data is read from and written to Android's system Telephony provider only after the user makes EutherPing the default SMS app. A private local index caches ordinary conversation previews for fast startup; cached Vessel rows use a neutral placeholder and never store decrypted Secure Ping plaintext. Secure Ping plaintext is decrypted only inside EutherPing; outgoing text, ratcheted attachment manifests, and Vessel drafts are stored in a Keystore-protected local vault with a separate Secure draft index so they never enter the ordinary draft store. EP3 ratchet account/session state is serialized by Vodozemac and envelope-encrypted under a dedicated Android Keystore key before atomic persistence. Attachment payloads remain encrypted in private app storage. Vessel image previews are decrypted and authenticated only after an explicit tap, decoded from memory without a plaintext preview file, and recycled when the bubble leaves composition. Explicitly opening a file creates a private view copy scheduled for deletion. Phonebook data is read locally only after the separate Contacts permission is granted. Android's biometric service verifies access to Vessels when the optional seal is enabled; EutherPing receives only success or failure and never fingerprint data. Theme and biometric-seal choices are stored only in local app preferences. Incoming-message notifications are generated locally, use an Android-controlled vibration channel, and do not expose Secure Ping plaintext on the lock screen. Cloud backup and device transfer are disabled.
 
 ## Visual direction
 
@@ -163,7 +169,7 @@ Near-black OLED surfaces, toxic-green sonar geometry, amber carrier signals, and
 
 ## Security direction
 
-EutherPing owns its `EP3I`/`EP3A` pairing envelopes and `EP3M` message envelope, product semantics, and versioning while Vodozemac owns ratchet session establishment and state advancement. Legacy `EP2I`/`EP2A`, `EP1I`/`EP1A`, and `EP1M` history remains readable. No silent fallback from EP3 to legacy Secure Ping, plaintext SMS, or MMS is allowed. Independent integration review and physical two-phone interop remain required before removing the beta label.
+EutherPing owns its `EP3I`/`EP3A` pairing, `EP3M` text, and `EP3F` attachment-manifest envelopes, product semantics, and versioning while Vodozemac owns ratchet session establishment and state advancement. Legacy `EP2I`/`EP2A`, `EP1I`/`EP1A`, `EP1M`, and `EP1F` history remains readable. No silent fallback from EP3 to legacy Secure Ping, plaintext SMS, or MMS is allowed. Independent integration review and physical two-phone interop remain required before removing the beta label.
 
 License selection is intentionally deferred until the first product architecture is settled.
 

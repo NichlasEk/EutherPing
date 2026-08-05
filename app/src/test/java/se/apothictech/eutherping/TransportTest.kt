@@ -20,6 +20,7 @@ class TransportTest {
     @Test
     fun `secure wire capsules route to vessels`() {
         assertTrue(SecureRepository.isSecureBody("EP2I:invite"))
+        assertTrue(SecureRepository.isSecureBody("EP3F:attachment"))
         assertTrue(SecureRepository.isSecureBody("EP2A:accept"))
         assertTrue(SecureRepository.isSecureBody("EP1M:message"))
         assertTrue(SecureRepository.isSecureBody("EP1F:attachment"))

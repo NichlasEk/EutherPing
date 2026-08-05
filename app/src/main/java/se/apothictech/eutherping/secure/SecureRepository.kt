@@ -107,6 +107,7 @@ object SecureRepository {
     const val INVITE_PREFIX = "EP3I:"
     const val ACCEPT_PREFIX = "EP3A:"
     const val RATCHET_MESSAGE_PREFIX = "EP3M:"
+    const val RATCHET_ATTACHMENT_PREFIX = "EP3F:"
     const val MESSAGE_PREFIX = "EP1M:"
     const val ATTACHMENT_PREFIX = "EP1F:"
 
@@ -122,6 +123,7 @@ object SecureRepository {
         INVITE_PREFIX,
         ACCEPT_PREFIX,
         RATCHET_MESSAGE_PREFIX,
+        RATCHET_ATTACHMENT_PREFIX,
         LEGACY_COMPACT_INVITE_PREFIX,
         LEGACY_COMPACT_ACCEPT_PREFIX,
         LEGACY_INVITE_PREFIX,
@@ -557,14 +559,11 @@ object SecureRepository {
     ): Result<String> = runCatching {
         val current = peer(context, address)
         check(current.canEncrypt) { "Secure Ping is not paired with this contact" }
-        check(current.protocol != SecureProtocol.RATCHET_EP3) {
-            "EP3 attachments require the upcoming ratcheted EP3F manifest"
-        }
         val recipientFingerprint = checkNotNull(current.fingerprint)
         val senderFingerprint = identity(context).fingerprint
         val payload = JSONObject()
             // Keep v1 for Wi-Fi interoperability with 0.6.x; Bluetooth fields are optional.
-            .put("v", 1)
+            .put("v", if (current.protocol == SecureProtocol.RATCHET_EP3) 3 else 1)
             .put("kind", "file")
             .put("id", descriptor.id)
             .put("ts", System.currentTimeMillis())
@@ -584,6 +583,15 @@ object SecureRepository {
             .put("btn", descriptor.bluetoothName ?: JSONObject.NULL)
             .toString()
             .toByteArray(UTF_8)
+        if (current.protocol == SecureProtocol.RATCHET_EP3) {
+            val ciphertext = SecureRatchetRuntime.encrypt(context, current.address, payload).getOrThrow()
+            storeOutgoing(context, descriptor.id, String(payload, UTF_8))
+            return@runCatching encodeRatchetFrame(
+                RATCHET_ATTACHMENT_PREFIX,
+                descriptor.id,
+                ciphertext,
+            )
+        }
         val signature = signingKeyset(context).getPrimitive(PublicKeySign::class.java).sign(payload)
         val signedPayload = JSONObject()
             .put("p", encode(payload))
@@ -622,6 +630,22 @@ object SecureRepository {
                 verified = peer(context, address).state == SecurePeerState.VERIFIED,
             )
         }.getOrElse { invalidSecureCapsule() }
+        body.startsWith(RATCHET_ATTACHMENT_PREFIX) -> decodeAttachmentOffer(
+            context,
+            address,
+            body,
+            incoming,
+        ).fold(
+            onSuccess = { attachment ->
+                SecureDecodedMessage(
+                    text = "📎 ${attachment.name} • ${formatAttachmentSize(attachment.plaintextSize)} • ${attachment.transportLabel}",
+                    isSecure = true,
+                    verified = peer(context, address).state == SecurePeerState.VERIFIED,
+                    attachment = attachment,
+                )
+            },
+            onFailure = { invalidSecureCapsule() },
+        )
         body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) ||
             body.startsWith(LEGACY_INVITE_PREFIX) -> decodeBundleForDisplay(
             body = body,
@@ -691,6 +715,11 @@ object SecureRepository {
                     RATCHET_MESSAGE_PREFIX,
                     hasMessageId = true,
                 ).messageId
+                body.startsWith(RATCHET_ATTACHMENT_PREFIX) -> decodeRatchetFrame(
+                    body,
+                    RATCHET_ATTACHMENT_PREFIX,
+                    hasMessageId = true,
+                ).messageId
                 body.startsWith(MESSAGE_PREFIX) -> parseMessageOuter(body).getString("id")
                 body.startsWith(ATTACHMENT_PREFIX) -> parseAttachmentOuter(body).getString("id")
                 else -> null
@@ -710,6 +739,15 @@ object SecureRepository {
             checkNotNull(loadOutgoing(context, id))
             "Ratcheted EP3 Ping received"
         }.getOrElse { "Unverified EP3 Ping received" }
+        body.startsWith(RATCHET_ATTACHMENT_PREFIX) -> runCatching {
+            val id = checkNotNull(
+                decodeRatchetFrame(body, RATCHET_ATTACHMENT_PREFIX, hasMessageId = true).messageId,
+            )
+            val payload = JSONObject(checkNotNull(loadOutgoing(context, id)))
+            check(payload.getInt("v") == 3 && payload.getString("kind") == "file")
+            attachmentDescriptor(payload, incoming = true)
+            "Ratcheted EP3 attachment offer received"
+        }.getOrElse { "Invalid EP3 attachment offer received" }
         body.startsWith(INVITE_PREFIX) || body.startsWith(LEGACY_COMPACT_INVITE_PREFIX) ||
             body.startsWith(LEGACY_INVITE_PREFIX) -> if (
             isValidBundle(
@@ -762,6 +800,12 @@ object SecureRepository {
         if (body.startsWith(RATCHET_MESSAGE_PREFIX)) {
             val authenticated = runCatching {
                 decryptAndCacheRatchetMessage(context, address, body)
+            }.getOrElse { return SecureFrameAcceptance.INVALID }
+            return SecureReplayRepository.accept(context, authenticated, now)
+        }
+        if (body.startsWith(RATCHET_ATTACHMENT_PREFIX)) {
+            val authenticated = runCatching {
+                decryptAndCacheRatchetAttachment(context, address, body)
             }.getOrElse { return SecureFrameAcceptance.INVALID }
             return SecureReplayRepository.accept(context, authenticated, now)
         }
@@ -825,12 +869,72 @@ object SecureRepository {
         )
     }
 
+    private fun decryptAndCacheRatchetAttachment(
+        context: Context,
+        address: String,
+        body: String,
+    ): AuthenticatedSecureFrame {
+        val current = peer(context, address)
+        check(current.protocol == SecureProtocol.RATCHET_EP3 && current.canEncrypt) {
+            "No verified EP3 session for sender"
+        }
+        val frame = decodeRatchetFrame(body, RATCHET_ATTACHMENT_PREFIX, hasMessageId = true)
+        val attachmentId = checkNotNull(frame.messageId)
+        val plaintext = SecureRatchetRuntime.decrypt(
+            context,
+            current.address,
+            frame.ciphertext,
+        ).getOrThrow()
+        val payloadText = String(plaintext, UTF_8)
+        val payload = JSONObject(payloadText)
+        check(payload.getInt("v") == 3)
+        check(payload.getString("kind") == "file")
+        check(payload.getString("id") == attachmentId)
+        check(payload.getString("from") == current.fingerprint)
+        check(payload.getString("to") == localFingerprint(context))
+        attachmentDescriptor(payload, incoming = true)
+        storeOutgoing(context, attachmentId, payloadText)
+        return AuthenticatedSecureFrame(
+            kind = "ep3-attachment",
+            id = attachmentId,
+            timestamp = payload.getLong("ts"),
+            senderFingerprint = checkNotNull(current.fingerprint),
+            ciphertextSha256 = sha256(frame.ciphertext.payload).toHex(),
+        )
+    }
+
     fun decodeAttachmentOffer(
         context: Context,
         address: String,
         body: String,
         incoming: Boolean,
     ): Result<SecureAttachmentDescriptor> = runCatching {
+        if (body.startsWith(RATCHET_ATTACHMENT_PREFIX)) {
+            val frame = decodeRatchetFrame(
+                body,
+                RATCHET_ATTACHMENT_PREFIX,
+                hasMessageId = true,
+            )
+            val attachmentId = checkNotNull(frame.messageId)
+            val payload = JSONObject(
+                loadOutgoing(context, attachmentId)
+                    ?: error("EP3 attachment metadata is unavailable on this installation"),
+            )
+            check(payload.getInt("v") == 3)
+            check(payload.getString("kind") == "file")
+            check(payload.getString("id") == attachmentId)
+            check(payload.getString("from") == if (incoming) {
+                peer(context, address).fingerprint
+            } else {
+                localFingerprint(context)
+            })
+            check(payload.getString("to") == if (incoming) {
+                localFingerprint(context)
+            } else {
+                peer(context, address).fingerprint
+            })
+            return@runCatching attachmentDescriptor(payload, incoming)
+        }
         val outer = parseAttachmentOuter(body)
         val payloadBytes = if (incoming) {
             decryptAndVerifyIncomingPayload(context, address, outer).toString().toByteArray(UTF_8)
@@ -919,18 +1023,22 @@ object SecureRepository {
         return outer
     }
 
-    private data class RatchetFrame(
+    internal data class RatchetFrame(
         val messageId: String?,
         val ciphertext: ProtocolCiphertext,
     )
 
-    private fun encodeRatchetFrame(
+    internal fun encodeRatchetFrame(
         prefix: String,
         messageId: String?,
         ciphertext: ProtocolCiphertext,
     ): String {
-        require(prefix == ACCEPT_PREFIX || prefix == RATCHET_MESSAGE_PREFIX)
+        require(
+            prefix == ACCEPT_PREFIX || prefix == RATCHET_MESSAGE_PREFIX ||
+                prefix == RATCHET_ATTACHMENT_PREFIX,
+        )
         require(ciphertext.providerId == SecureRatchetRuntime.descriptor.providerId)
+        if (messageId != null) UUID.fromString(messageId)
         val idBytes = messageId?.toByteArray(UTF_8) ?: byteArrayOf()
         require(idBytes.size == 36 || idBytes.isEmpty()) { "Invalid EP3 message ID" }
         val wire = ByteBuffer.allocate(1 + 1 + 1 + idBytes.size + Int.SIZE_BYTES + ciphertext.payload.size)
@@ -945,7 +1053,7 @@ object SecureRepository {
         return prefix + encode(wire)
     }
 
-    private fun decodeRatchetFrame(
+    internal fun decodeRatchetFrame(
         body: String,
         prefix: String,
         hasMessageId: Boolean,

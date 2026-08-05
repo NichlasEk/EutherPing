@@ -1,6 +1,7 @@
 # Secure Vessels reviewed-protocol migration
 
-Status: EutherPing 0.8.12 paired-device Ratchet Beta. EP3 text traffic is now
+Status: EutherPing 0.8.13 paired-device Ratchet Beta. EP3 text and attachment
+manifest traffic is enabled
 enabled only after a fresh explicit pairing and safety-code verification.
 Independent review and physical two-phone evidence remain incomplete.
 
@@ -60,13 +61,14 @@ group feature.
 
 ## Proposed wire transition
 
-The 0.8.12 beta uses binary, URL-safe Base64 SMS envelopes:
+The 0.8.13 beta uses binary, URL-safe Base64 SMS envelopes:
 
 - `EP3I`: signed version 4 Tink identity plus Vodozemac pre-key publication.
 - `EP3A`: first encrypted PRE_KEY message containing the acceptor's signed
   identity and ratchet publication.
 - `EP3M`: ratcheted one-to-one application message.
-- `EP3F`: reserved and not implemented; attachments fail closed for EP3.
+- `EP3F`: ratcheted attachment manifest containing the authenticated encrypted
+  payload metadata and direct Wi-Fi/Bluetooth transfer capability.
 - `EP3R`: reserved and not implemented; verified reset UX remains a release gate.
 
 The encrypted EP3M plaintext binds its UUID, timestamp, sender fingerprint,
@@ -124,7 +126,8 @@ keysets, and legacy `EP1` plaintext vault entries.
 3. **EP3 interoperability harness.** Independent encrypted Alice/Bob stores now
    cover initial, bidirectional, out-of-order, replay, tamper, identity
    substitution, and reload transitions. App-envelope fuzz/crash coverage remains.
-4. **Opt-in paired-device beta.** Implemented in 0.8.12: require a new verification and show a distinct
+4. **Opt-in paired-device beta.** Implemented for text in 0.8.12 and EP3F in
+   0.8.13: require a new verification and show a distinct
    `RATCHET BETA` state. Keep EP1 history read-only. Never auto-upgrade one phone
    while the peer cannot understand EP3.
 5. **Migration release.** Enable new sessions only after Samsung and GrapheneOS

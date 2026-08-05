@@ -1,6 +1,6 @@
 # Secure pairing control framing
 
-Status: EutherPing 0.8.12 Ratchet Beta framing. This document describes both
+Status: EutherPing 0.8.13 Ratchet Beta framing. This document describes both
 the retained legacy identity exchange and the EP3 session bootstrap. It does
 not constitute an independent cryptographic review.
 
