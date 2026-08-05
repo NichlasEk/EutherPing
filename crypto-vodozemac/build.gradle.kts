@@ -66,6 +66,7 @@ tasks.configureEach {
 
 dependencies {
     api(project(":crypto-api"))
+    androidTestImplementation(project(":crypto-storage-android"))
     androidTestImplementation("androidx.test.ext:junit:1.3.0")
     androidTestImplementation("androidx.test:runner:1.7.0")
 }

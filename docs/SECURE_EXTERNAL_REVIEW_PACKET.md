@@ -25,6 +25,8 @@ state handling, not infer safety from the primitives alone.
   current dependency and license comparison.
 - [`SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md):
   measured JNI/provider checkpoint, license choice, and remaining gates.
+- [`SECURE_SESSIONS_V3_STORAGE-2026-08-05.md`](SECURE_SESSIONS_V3_STORAGE-2026-08-05.md):
+  real Keystore/AtomicFile state implementation and failure evidence.
 - [`PRIVACY.md`](PRIVACY.md): user-facing storage and disclosure claims.
 
 ## Required code review areas
@@ -61,6 +63,9 @@ state handling, not infer safety from the primitives alone.
   identity binding, bidirectional/out-of-order ratchet, opaque reload, replay
   rejection, identity-change rejection, and copy-on-write rollback tests on
   Android 11. This module is not linked into the shipping app.
+- Real Android Keystore/no-backup persistence, atomic rollback, simulated commit
+  failure, ciphertext tamper, cross-identity swap, repository re-instantiation,
+  and persistent Alice/Bob continuation tests for `secure_sessions_v3`.
 - Full 0.8.9 unit, lint, debug/release, and instrumentation gate, including
   ordinary/Secure draft namespace separation and legacy metadata migration.
 

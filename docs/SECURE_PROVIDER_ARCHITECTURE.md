@@ -6,10 +6,12 @@ Status: non-shipping architecture checkpoint, 2026-08-05.
 EutherPing app
     |
     +-- crypto-api: SecureProtocolProvider boundary
-            |
-            +-- crypto-libsignal: libsignal 0.99.4 (AGPL-3.0-only)
-            +-- crypto-vodozemac: Vodozemac 0.10.0 probe (Apache-2.0)
-            +-- legacy Tink reader/migration adapter (future)
+    |       |
+    |       +-- crypto-libsignal: libsignal 0.99.4 (AGPL-3.0-only)
+    |       +-- crypto-vodozemac: Vodozemac 0.10.0 probe (Apache-2.0)
+    |       +-- legacy Tink reader/migration adapter (future)
+    |
+    +-- crypto-storage-android: Keystore + AtomicFile secure_sessions_v3
 ```
 
 `crypto-api` contains no cryptographic primitive. It identifies the provider
@@ -38,11 +40,15 @@ storage and production gates in
 ## State boundary
 
 Every protocol transition runs inside one per-local-identity copy-on-write
-transaction. A production repository must envelope-encrypt every opaque record
-under a dedicated Android Keystore key and atomically commit ratchet state
-before exposing received plaintext. Exceptions commit nothing. Protocol state,
-legacy Tink state, Telephony data, ordinary caches, Secure plaintext, and
-attachment ciphertext remain separate namespaces.
+transaction. `crypto-storage-android` now implements this contract with
+AES-256-GCM under Android Keystore, namespace-bound associated data, bounded
+records, `AtomicFile`, and `fsync`. It stores files only in
+`noBackupFilesDir/secure_sessions_v3`; exceptions commit nothing, and received
+plaintext is returned only after the encrypted state commit succeeds. Protocol
+state, legacy Tink state, Telephony data, ordinary caches, Secure plaintext,
+and attachment ciphertext remain separate namespaces. Detailed evidence and
+remaining physical-device gates are in
+[`SECURE_SESSIONS_V3_STORAGE-2026-08-05.md`](SECURE_SESSIONS_V3_STORAGE-2026-08-05.md).
 
 ## Distribution boundary
 

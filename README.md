@@ -41,6 +41,8 @@ The current `libsignal`, Vodozemac, and OpenMLS comparison is in
 [`docs/SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](docs/SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md),
 the measured minimal-native comparison and Vodozemac spike decision are in
 [`docs/SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md`](docs/SECURE_PROVIDER_SIZE_COMPARISON-2026-08-05.md),
+the real Keystore/AtomicFile session-state checkpoint is in
+[`docs/SECURE_SESSIONS_V3_STORAGE-2026-08-05.md`](docs/SECURE_SESSIONS_V3_STORAGE-2026-08-05.md),
 and the independent-review evidence checklist is in
 [`docs/SECURE_EXTERNAL_REVIEW_PACKET.md`](docs/SECURE_EXTERNAL_REVIEW_PACKET.md).
 The requirement-by-requirement implementation, emulator, physical-device, and

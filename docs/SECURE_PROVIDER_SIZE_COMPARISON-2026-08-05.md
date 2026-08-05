@@ -100,13 +100,12 @@ dependency.
 
 ## Next production gates
 
-1. Replace the in-memory test repository with a dedicated Keystore-encrypted,
-   crash-safe implementation of `secure_sessions_v3`.
-2. Freeze and externally review the compact key-publication envelope and
+1. Freeze and externally review the compact key-publication envelope and
    safety-code binding. No unauthenticated carrier key lookup is permitted.
-3. Add malformed input, corrupt pickle, rollback, skipped-key exhaustion,
+2. Add malformed input, corrupt pickle, skipped-key exhaustion,
    reinstall, identity-change, and version-skew fixtures.
-4. Prove Samsung/GrapheneOS interoperability with delayed, duplicated, and
+3. Prove the real `secure_sessions_v3` repository across force-stop/reboot on
+   Samsung and GrapheneOS with delayed, duplicated, and
    out-of-order delivery.
-5. Obtain external cryptographic integration review before EP3 production or
+4. Obtain external cryptographic integration review before EP3 production or
    removal of the Secure Beta label.

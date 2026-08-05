@@ -3,6 +3,9 @@
 package se.apothictech.eutherping.crypto.vodozemac
 
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
+import java.util.UUID
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -14,9 +17,58 @@ import se.apothictech.eutherping.crypto.ProtocolCiphertext
 import se.apothictech.eutherping.crypto.ProtocolCiphertextKind
 import se.apothictech.eutherping.crypto.ProtocolStateRepository
 import se.apothictech.eutherping.crypto.ProtocolStateTransaction
+import se.apothictech.eutherping.crypto.storage.SecureSessionStateRepository
 
 @RunWith(AndroidJUnit4::class)
 class VodozemacProviderTest {
+    @Test
+    fun realKeystoreRepositoriesPersistTwoIdentitiesAcrossReload() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val suffix = UUID.randomUUID().toString()
+        val aliceNamespace = "real-alice-$suffix"
+        val bobNamespace = "real-bob-$suffix"
+        val aliceState = SecureSessionStateRepository(context, aliceNamespace)
+        val bobState = SecureSessionStateRepository(context, bobNamespace)
+        val provider = VodozemacProvider()
+        val aliceAddress = ProtocolAddress("alice")
+        val bobAddress = ProtocolAddress("bob")
+        val marker = "real-persistent-message-$suffix".encodeToByteArray()
+        try {
+            var alice = provider.createEngine(aliceAddress, aliceState)
+            var bob = provider.createEngine(bobAddress, bobState)
+            val bobPublication = bob.createPreKeyPublication()
+            alice.establishOutboundSession(bobAddress, bobPublication)
+            val initial = alice.encrypt(bobAddress, marker)
+            assertArrayEquals(marker, bob.decrypt(aliceAddress, initial))
+
+            alice = provider.createEngine(
+                aliceAddress,
+                SecureSessionStateRepository(context, aliceNamespace),
+            )
+            bob = provider.createEngine(
+                bobAddress,
+                SecureSessionStateRepository(context, bobNamespace),
+            )
+            val reply = bob.encrypt(aliceAddress, "after-real-reload".encodeToByteArray())
+            assertArrayEquals(
+                "after-real-reload".encodeToByteArray(),
+                alice.decrypt(bobAddress, reply),
+            )
+
+            val storageDirectory = File(context.noBackupFilesDir, "secure_sessions_v3")
+            assertTrue(storageDirectory.isDirectory)
+            assertFalse(
+                storageDirectory.listFiles().orEmpty().any { file ->
+                    file.isFile && file.readBytes().contains(marker)
+                },
+            )
+        } finally {
+            marker.fill(0)
+            aliceState.deleteAllStateForVerifiedReset()
+            bobState.deleteAllStateForVerifiedReset()
+        }
+    }
+
     @Test
     fun providerRatchetsOutOfOrderRejectsReplayAndSurvivesReload() {
         val provider = VodozemacProvider()
@@ -156,3 +208,10 @@ private class MemoryTransaction(
         it.startsWith(prefix)
     }
 }
+
+private fun ByteArray.contains(needle: ByteArray): Boolean =
+    needle.isNotEmpty() && indices.any { start ->
+        start + needle.size <= size && needle.indices.all { offset ->
+            this[start + offset] == needle[offset]
+        }
+    }

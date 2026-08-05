@@ -26,5 +26,6 @@ include(":crypto-api")
 include(":crypto-libsignal")
 include(":crypto-probe-app")
 if (providers.gradleProperty("includeCryptoVodoProbe").orNull == "true") {
+    include(":crypto-storage-android")
     include(":crypto-vodozemac")
 }

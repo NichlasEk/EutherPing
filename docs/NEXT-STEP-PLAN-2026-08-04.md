@@ -121,7 +121,9 @@ bridge. Details are in
 The current candidate comparison finds no permissively licensed, reviewed,
 supported Android drop-in. Vodozemac 0.10.0 now contains the upstream X25519
 fix and is implemented behind `SecureProtocolProvider` as an isolated,
-transactional Android checkpoint; a Keystore-encrypted durable repository,
+transactional Android checkpoint. A real `secure_sessions_v3` repository now
+persists opaque state with Android Keystore, namespace-bound AES-GCM,
+`AtomicFile`, and rollback/corruption tests; physical force-stop/reboot,
 outside-Matrix integration review, and 64-bit-tag acceptance remain gates.
 OpenMLS requires a larger
 authentication/delivery architecture. The decision and reviewer-ready evidence

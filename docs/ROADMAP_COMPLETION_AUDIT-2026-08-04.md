@@ -29,7 +29,7 @@ evidence.
 | 4 — Samsung smoothness | Bounded provider paging, lazy MMS decode/cache, lifecycle refresh, Baseline Profile journeys, local timing/jank diagnostics, and secret-exclusion tests. | Implementation present. The plan's before/after cold/warm timings and scroll-jank comparison on the target Samsung and GrapheneOS are missing; smoothness is not proven by the emulator. |
 | 5 — multi-SIM/group MMS | Explicit per-conversation SIM selection, unavailable-SIM fail-closed behavior, subscription labels, participant-based group identity/reply-all, and subscription/group provider tests. | Implementation present. Real dual-SIM choice, group send/receive, roaming, Wi-Fi calling, mobile-data-off, failure/retry, and carrier interoperability matrix are missing. |
 | 6 — Secure storage and framing hardening | Dedicated keyset/peer/vault/replay/draft-index stores; encrypted attachment directories; explicit in-memory image preview; temporary open/save cleanup; signed fresh pairing; replay/stale/conflict rejection; fail-closed identity quarantine. Instrumentation covers these boundaries, including legacy draft-index migration. | Current beta hardening is implemented and tested. Carrier metadata and encrypted capsules necessarily remain in Telephony; no Secure plaintext enters ordinary message/draft/index storage. |
-| 6 — reviewed ratcheting protocol | Migration design, candidate assessment, provider-neutral API, pinned isolated libsignal 0.99.4 adapter, measured comparison, opt-in Vodozemac 0.10.0 `SecureProtocolProvider`, signed identity frames, opaque transactional state, Android rollback/reload/ratchet tests, threat/recovery cases, and external-review packet. | **Incomplete.** The provider is not wired to the app; EP3, a Keystore-encrypted durable store, practical prekey delivery, two-phone physical interoperability, distribution review, external report, and closed remediation list do not exist. Secure Beta must remain. |
+| 6 — reviewed ratcheting protocol | Migration design, candidate assessment, provider-neutral API, pinned isolated libsignal 0.99.4 adapter, measured comparison, opt-in Vodozemac 0.10.0 `SecureProtocolProvider`, signed identity frames, real Keystore/AtomicFile `secure_sessions_v3`, persistent Alice/Bob Android tests, threat/recovery cases, and external-review packet. | **Incomplete.** The provider/store are not wired to the app; EP3, practical prekey delivery, physical force-stop/reboot and two-phone interoperability, distribution review, external report, and closed remediation list do not exist. Secure Beta must remain. |
 
 ## Remaining completion path
 
@@ -38,10 +38,9 @@ evidence.
 2. Run the documented Samsung/GrapheneOS performance, biometric, outbox,
    multi-SIM, group-MMS, and Secure attachment matrices with both phones
    connected and their intended SIM/carrier conditions available.
-3. Implement the Keystore-encrypted transactional session store for the
-   selected Vodozemac checkpoint, resolve authenticated prekey delivery, freeze
-   an EP3 harness, and run an opt-in two-device beta plus migration/downgrade
-   tests.
+3. Resolve authenticated prekey delivery, freeze an EP3 harness around the
+   persistent Vodozemac checkpoint, and run an opt-in two-device beta plus
+   force-stop/reboot and migration/downgrade tests.
 4. Commission the external review described in
    [`SECURE_EXTERNAL_REVIEW_PACKET.md`](SECURE_EXTERNAL_REVIEW_PACKET.md), fix
    every finding, and obtain reviewer retest sign-off.
