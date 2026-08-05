@@ -29,7 +29,7 @@ evidence.
 | 4 — Samsung smoothness | Bounded provider paging, lazy MMS decode/cache, lifecycle refresh, Baseline Profile journeys, local timing/jank diagnostics, and secret-exclusion tests. | Implementation present. The plan's before/after cold/warm timings and scroll-jank comparison on the target Samsung and GrapheneOS are missing; smoothness is not proven by the emulator. |
 | 5 — multi-SIM/group MMS | Explicit per-conversation SIM selection, unavailable-SIM fail-closed behavior, subscription labels, participant-based group identity/reply-all, and subscription/group provider tests. | Implementation present. Real dual-SIM choice, group send/receive, roaming, Wi-Fi calling, mobile-data-off, failure/retry, and carrier interoperability matrix are missing. |
 | 6 — Secure storage and framing hardening | Dedicated keyset/peer/vault/replay/draft-index stores; encrypted attachment directories; explicit in-memory image preview; temporary open/save cleanup; signed fresh pairing; replay/stale/conflict rejection; fail-closed identity quarantine. Instrumentation covers these boundaries, including legacy draft-index migration. | Current beta hardening is implemented and tested. Carrier metadata and encrypted capsules necessarily remain in Telephony; no Secure plaintext enters ordinary message/draft/index storage. |
-| 6 — reviewed ratcheting protocol | Migration design, candidate assessment, threat/recovery cases, EP3 boundary, required fixtures, and external-review packet. | **Incomplete.** No approved license-compatible ratchet dependency, EP3 implementation, interoperability harness, two-phone session, external report, or closed remediation list exists. Secure Beta must remain. |
+| 6 — reviewed ratcheting protocol | Migration design, candidate assessment, provider-neutral API, pinned isolated libsignal 0.99.4 adapter, Alice/Bob JVM harness, Android JNI probe, measured sizes, threat/recovery cases, and external-review packet. | **Incomplete.** The dependency is not wired to the app; EP3, an encrypted durable store, practical prekey delivery, two-phone physical interoperability, distribution review, external report, and closed remediation list do not exist. Secure Beta must remain. |
 
 ## Remaining completion path
 
@@ -38,9 +38,9 @@ evidence.
 2. Run the documented Samsung/GrapheneOS performance, biometric, outbox,
    multi-SIM, group-MMS, and Secure attachment matrices with both phones
    connected and their intended SIM/carrier conditions available.
-3. Obtain the owner's explicit ratchet/license choice. Do the dependency spike,
-   encrypted transactional session store, EP3 harness, opt-in two-device beta,
-   migration/downgrade tests, and artifact-size/SMS-cost measurements.
+3. Resolve the spike's prekey/SMS and native-size blockers. Then implement the
+   encrypted transactional session store, freeze an EP3 harness, and run an
+   opt-in two-device beta plus migration/downgrade tests.
 4. Commission the external review described in
    [`SECURE_EXTERNAL_REVIEW_PACKET.md`](SECURE_EXTERNAL_REVIEW_PACKET.md), fix
    every finding, and obtain reviewer retest sign-off.

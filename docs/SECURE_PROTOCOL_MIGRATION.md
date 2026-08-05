@@ -1,7 +1,7 @@
 # Secure Vessels reviewed-protocol migration
 
-Status: design checkpoint for independent review. No new protocol dependency is
-enabled by this document. EutherPing remains **Secure Beta**.
+Status: isolated dependency-spike checkpoint for independent review. No new
+protocol is enabled in the shipping app. EutherPing remains **Secure Beta**.
 
 The legacy identity-control boundary, including the signed fresh version 3
 pairing capsule and its fail-closed replacement policy, is documented in
@@ -16,17 +16,18 @@ packages and protocol state machine rather than implementing Double Ratchet in
 EutherPing. Signal documents that this implementation includes Double Ratchet,
 is used by its official clients, and publishes Android ABIs and Java artifacts.
 
-This selection is blocked before dependency integration for two explicit
-reasons:
+On 2026-08-05 the owner explicitly accepted the `libsignal`/AGPLv3 direction for
+an isolated spike. Version `0.99.4` is therefore pinned only in the non-shipping
+`crypto-libsignal` and `crypto-probe-app` modules. The ordinary `app` module has
+no dependency on either module and its APK contains no libsignal classes or
+native libraries. Signal states that use outside Signal is unsupported and that
+APIs may change without notice, so EutherPing still owns compatibility,
+update, security-response, distribution-license, and Play-policy review.
 
-1. `libsignal` is GNU AGPLv3 while EutherPing currently has no repository license.
-   Adding it is a product licensing decision, not a mechanical build change.
-2. Signal states that use outside Signal is unsupported and that APIs may change
-   without notice. EutherPing must pin an exact version and own compatibility,
-   update, and security-response work.
-
-No `libsignal` binary or source may be added until the owner accepts the license
-and maintenance implications or selects a different reviewed implementation.
+The measured spike and its stop-ship findings are recorded in
+[`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md). In particular,
+the current post-quantum prekey and first ciphertext are too large to activate
+over carrier SMS. No `EP3` format is frozen and no existing Vessel is migrated.
 The current permissive-alternative comparison and its additional security gates
 are recorded in
 [`SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md`](SECURE_PROTOCOL_CANDIDATE_ASSESSMENT.md).

@@ -111,12 +111,12 @@ reviewed; legacy conversations fail safely; no silent plaintext fallback exists.
 
 Design status: [`SECURE_PROTOCOL_MIGRATION.md`](SECURE_PROTOCOL_MIGRATION.md)
 selects Signal's current `libsignal` as the leading one-to-one implementation
-and MLS as a later group candidate. Integration is intentionally blocked on an
-explicit AGPLv3/unsupported-external-API ownership decision; the repository has
-no declared license, so adding the dependency would be a material product and
-distribution decision. The design specifies EP3 coexistence, fresh verification,
-encrypted atomic state, failure/reinstall behavior, test evidence, and external
-review gates.
+and MLS as a later group candidate. The owner accepted the libsignal/AGPLv3
+direction on 2026-08-05. A provider-neutral API and pinned `0.99.4` adapter now
+exist only in isolated, non-shipping modules. The spike proves Alice/Bob
+ratcheting, out-of-order delivery, replay rejection, reload, atomic rollback,
+and Android JNI loading, but exposes blocking SMS and APK-size costs. Details
+are in [`LIBSIGNAL_SPIKE-2026-08-05.md`](LIBSIGNAL_SPIKE-2026-08-05.md).
 The current candidate comparison finds no permissively licensed, reviewed,
 supported Android drop-in: Vodozemac requires an explicit upstream X25519 fix,
 outside-Matrix integration review, and owned Rust/JNI layer; OpenMLS requires a
@@ -208,3 +208,9 @@ or protocol gates are maintained in
   vibration, Do Not Disturb, device, and user overrides remain authoritative.
   Instrumentation verifies the shipped channel ID and pattern. Physical feel
   and suppression behavior remain to be accepted on Samsung and GrapheneOS.
+- Post-`0.8.10` protocol checkpoint: provider-neutral `crypto-api`, isolated
+  `crypto-libsignal`, and a non-shipping Android probe pin libsignal `0.99.4`.
+  No app dependency, EP3 traffic, existing-Vessel migration, APK release, or
+  server deployment is introduced. SMS/prekey delivery, native size, encrypted
+  durable state, licensing, physical-device interoperability, and external
+  review remain production gates.

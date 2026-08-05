@@ -11,9 +11,17 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        maven {
+            name = "SignalBuildArtifacts"
+            url = uri("https://build-artifacts.signal.org/libraries/maven/")
+            content { includeGroup("org.signal") }
+        }
     }
 }
 
 rootProject.name = "EutherPing"
 include(":app")
 include(":baselineprofile")
+include(":crypto-api")
+include(":crypto-libsignal")
+include(":crypto-probe-app")
