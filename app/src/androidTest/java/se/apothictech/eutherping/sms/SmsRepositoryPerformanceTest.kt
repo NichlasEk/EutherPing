@@ -110,20 +110,62 @@ class SmsRepositoryPerformanceTest {
         }
     }
 
+    @Test
+    fun contactOpenResolvesFormattedAddressBeforeLoadingBothDirections() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        InstrumentationRegistry.getInstrumentation().uiAutomation
+            .executeShellCommand("cmd role add-role-holder android.app.role.SMS ${context.packageName}")
+            .close()
+        Thread.sleep(500)
+
+        val suffix = System.currentTimeMillis().toString().takeLast(7)
+        val storedAddress = "+1 555 ${suffix.take(3)} ${suffix.drop(3)}"
+        val selectedAddress = "+1555$suffix"
+        val inserted = listOf(
+            insert(context, storedAddress, "incoming formatted", 20_000L),
+            insert(
+                context,
+                storedAddress,
+                "outgoing formatted",
+                21_000L,
+                Telephony.Sms.MESSAGE_TYPE_SENT,
+            ),
+        )
+        try {
+            val page = SmsRepository.loadMessagePage(
+                context = context,
+                threadId = null,
+                address = selectedAddress,
+                limit = 20,
+                secureLane = false,
+            ).getOrThrow()
+
+            assertTrue(page.resolvedThreadId != null)
+            assertEquals(
+                listOf("incoming formatted", "outgoing formatted"),
+                page.messages.map(SmsEntry::body),
+            )
+            assertEquals(listOf(true, false), page.messages.map(SmsEntry::incoming))
+        } finally {
+            inserted.forEach { context.contentResolver.delete(it, null, null) }
+        }
+    }
+
     private fun insert(
         context: android.content.Context,
         address: String,
         body: String,
         timestamp: Long,
+        type: Int = Telephony.Sms.MESSAGE_TYPE_INBOX,
     ) = checkNotNull(
         context.contentResolver.insert(
-            Telephony.Sms.Inbox.CONTENT_URI,
+            Telephony.Sms.CONTENT_URI,
             ContentValues().apply {
                 put(Telephony.Sms.ADDRESS, address)
                 put(Telephony.Sms.BODY, body)
                 put(Telephony.Sms.DATE, timestamp)
                 put(Telephony.Sms.READ, 0)
-                put(Telephony.Sms.TYPE, Telephony.Sms.MESSAGE_TYPE_INBOX)
+                put(Telephony.Sms.TYPE, type)
             },
         ),
     )

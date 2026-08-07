@@ -1851,7 +1851,6 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
     val realMessagePage by produceState(
         initialValue = LoadedConversationMessages(),
-        resolvedThreadId,
         conversation.smsAddress,
         smsRevision,
         secureRevision,
@@ -1860,8 +1859,22 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     ) {
         messagePageLoading = true
         val requestedLimit = messageLimit
+        val effectiveThreadId = if (isRealSms) {
+            withContext(Dispatchers.IO) {
+                SmsRepository.resolveConversationThreadId(
+                    context,
+                    resolvedThreadId,
+                    conversation.smsAddress.orEmpty(),
+                )
+            }
+        } else {
+            resolvedThreadId
+        }
+        if (effectiveThreadId != null && effectiveThreadId != resolvedThreadId) {
+            resolvedThreadId = effectiveThreadId
+        }
         val cacheKey = ConversationPageCacheKey(
-            threadId = resolvedThreadId,
+            threadId = effectiveThreadId,
             address = conversation.smsAddress.orEmpty(),
             secureLane = secureLane,
             smsRevision = smsRevision,
@@ -1888,7 +1901,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                 val startedAt = SystemClock.elapsedRealtime()
                 SmsRepository.loadMessagePage(
                     context = context,
-                    threadId = resolvedThreadId,
+                    threadId = effectiveThreadId,
                     address = conversation.smsAddress.orEmpty(),
                     limit = requestedLimit,
                     secureLane = secureLane,

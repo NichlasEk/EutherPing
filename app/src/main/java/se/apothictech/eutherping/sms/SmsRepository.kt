@@ -97,6 +97,7 @@ data class SmsConversationIndexEntry(
 data class SmsMessagePage(
     val messages: List<SmsEntry>,
     val hasOlder: Boolean,
+    val resolvedThreadId: Long? = null,
 )
 
 data class SmsSearchHit(
@@ -496,6 +497,7 @@ object SmsRepository {
     ): Result<SmsMessagePage> = runCatching {
         check(hasSmsPermissions(context)) { "SMS permissions are not granted" }
         require(limit > 0) { "Message limit must be positive" }
+        val effectiveThreadId = resolveConversationThreadId(context, threadId, address)
         val projection = arrayOf(
             Telephony.Sms._ID,
             Telephony.Sms.BODY,
@@ -506,9 +508,9 @@ object SmsRepository {
         )
         var selection: String
         var arguments: Array<String>
-        if (threadId != null && threadId > 0) {
+        if (effectiveThreadId != null) {
             selection = "${Telephony.Sms.THREAD_ID} = ?"
-            arguments = arrayOf(threadId.toString())
+            arguments = arrayOf(effectiveThreadId.toString())
         } else {
             selection = "${Telephony.Sms.ADDRESS} = ?"
             arguments = arrayOf(address)
@@ -554,7 +556,7 @@ object SmsRepository {
         val mmsEntries = if (secureLane == true) {
             emptyList()
         } else {
-            loadMmsEntries(context, threadId, address, limit = queryLimit)
+            loadMmsEntries(context, effectiveThreadId, address, limit = queryLimit)
         }
         val mmsTruncated = mmsEntries.size > limit
         mmsEntries.forEach { mms ->
@@ -576,7 +578,74 @@ object SmsRepository {
         SmsMessagePage(
             messages = newest.take(limit).sortedBy(SmsEntry::timestamp),
             hasOlder = smsTruncated || mmsTruncated || newest.size > limit,
+            resolvedThreadId = effectiveThreadId,
         )
+    }
+
+    internal fun resolveConversationThreadId(
+        context: Context,
+        threadId: Long?,
+        address: String,
+    ): Long? {
+        threadId?.takeIf { it > 0L }?.let { return it }
+        val trimmedAddress = address.trim()
+        if (trimmedAddress.isBlank()) return null
+
+        fun queryThreadId(selection: String, arguments: Array<String>): Long? = runCatching {
+            queryNewest(
+                context = context,
+                uri = Telephony.Sms.CONTENT_URI,
+                projection = arrayOf(Telephony.Sms.THREAD_ID),
+                selection = selection,
+                arguments = arguments,
+                sortColumn = Telephony.Sms.DATE,
+                limit = 1,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0).takeIf { it > 0L } else null
+            }
+        }.getOrNull()
+
+        queryThreadId(
+            "${Telephony.Sms.ADDRESS} = ?",
+            arrayOf(trimmedAddress),
+        )?.let { return it }
+
+        val normalizedAddress = PhoneNumberUtils.normalizeNumber(trimmedAddress)
+        if (normalizedAddress.length >= 7 && ',' !in trimmedAddress && ';' !in trimmedAddress) {
+            queryThreadId(
+                "PHONE_NUMBERS_EQUAL(${Telephony.Sms.ADDRESS}, ?, 0)",
+                arrayOf(trimmedAddress),
+            )?.let { return it }
+
+            runCatching {
+                queryNewest(
+                    context = context,
+                    uri = Telephony.Sms.CONTENT_URI,
+                    projection = arrayOf(Telephony.Sms.THREAD_ID, Telephony.Sms.ADDRESS),
+                    selection = "1 = 1",
+                    arguments = emptyArray(),
+                    sortColumn = Telephony.Sms.DATE,
+                    limit = 300,
+                )?.use { cursor ->
+                    val threadIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.THREAD_ID)
+                    val addressIndex = cursor.getColumnIndexOrThrow(Telephony.Sms.ADDRESS)
+                    while (cursor.moveToNext()) {
+                        val candidate = cursor.getString(addressIndex).orEmpty()
+                        if (PhoneNumberUtils.compare(trimmedAddress, candidate)) {
+                            return cursor.getLong(threadIndex).takeIf { it > 0L }
+                        }
+                    }
+                }
+            }
+        }
+
+        return loadMmsEntries(
+            context = context,
+            threadId = null,
+            address = trimmedAddress,
+            includeParts = false,
+            limit = 50,
+        ).firstNotNullOfOrNull(MmsEntry::threadId)
     }
 
     fun searchMessages(
