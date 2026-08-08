@@ -62,6 +62,29 @@ class SmsDeliveryStatusTest {
         }
     }
 
+    @Test
+    fun outgoingStatusTransitionRepairsVendorUnreadFlags() {
+        val context = readyContext()
+        val uri = insertOutbox(context)
+        try {
+            context.contentResolver.update(
+                uri,
+                ContentValues().apply {
+                    put(Telephony.Sms.READ, 0)
+                    put(Telephony.Sms.SEEN, 0)
+                },
+                null,
+                null,
+            )
+
+            SmsRepository.updateSentPartState(context, uri, Activity.RESULT_OK, 0, 1)
+
+            assertEquals(1 to 1, readState(context, uri))
+        } finally {
+            context.contentResolver.delete(uri, null, null)
+        }
+    }
+
     private fun readyContext(): Context {
         val context = ApplicationProvider.getApplicationContext<Context>()
         InstrumentationRegistry.getInstrumentation().uiAutomation
@@ -89,6 +112,18 @@ class SmsDeliveryStatusTest {
         context.contentResolver.query(
             uri,
             arrayOf(Telephony.Sms.TYPE, Telephony.Sms.STATUS),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getInt(0) to cursor.getInt(1) else null
+        },
+    )
+
+    private fun readState(context: Context, uri: Uri): Pair<Int, Int> = checkNotNull(
+        context.contentResolver.query(
+            uri,
+            arrayOf(Telephony.Sms.READ, Telephony.Sms.SEEN),
             null,
             null,
             null,

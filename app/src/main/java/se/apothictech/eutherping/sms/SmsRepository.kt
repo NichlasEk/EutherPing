@@ -1407,6 +1407,10 @@ object SmsRepository {
         val values = ContentValues().apply {
             put(Telephony.Sms.TYPE, box)
             put(Telephony.Sms.STATUS, status)
+            // Some vendor providers reset these columns when an outgoing row moves between
+            // OUTBOX, SENT, and FAILED. A message authored on this phone is never unread.
+            put(Telephony.Sms.READ, 1)
+            put(Telephony.Sms.SEEN, 1)
         }
         runCatching { context.contentResolver.update(messageUri, values, null, null) }
         context.sendBroadcast(Intent(ACTION_SMS_CHANGED).setPackage(context.packageName))
