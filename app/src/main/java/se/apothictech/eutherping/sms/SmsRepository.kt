@@ -109,6 +109,17 @@ data class SmsSearchHit(
     val incoming: Boolean,
 )
 
+internal inline fun chooseMmsParticipants(
+    canonicalParticipants: List<String>,
+    addressParticipants: () -> List<String>,
+): List<String> = canonicalParticipants.ifEmpty(addressParticipants)
+
+internal fun shouldOmitSoleIncomingMmsRecipient(
+    incoming: Boolean,
+    ownNumbersKnown: Boolean,
+    toAddressCount: Int,
+): Boolean = incoming && !ownNumbersKnown && toAddressCount == 1
+
 data class CarrierMmsAttachment(
     val uri: Uri,
     val mimeType: String,
@@ -123,6 +134,8 @@ object SmsRepository {
     const val EXTRA_PART_INDEX = "part_index"
     const val EXTRA_PART_COUNT = "part_count"
     private const val STATUS_PREFERENCES = "sms_send_status"
+    private const val THREAD_RECIPIENT_IDS = "recipient_ids"
+    private val CANONICAL_ADDRESSES_URI = Uri.parse("content://mms-sms/canonical-addresses")
 
     val requiredPermissions = buildList {
         add(Manifest.permission.READ_SMS)
@@ -318,6 +331,7 @@ object SmsRepository {
             }
         }
 
+        val canonicalParticipantsByThread = canonicalThreadParticipants(context)
         val resolvedMmsParticipants = mutableMapOf<Long, List<String>>()
         loadMmsEntries(
             context,
@@ -329,7 +343,9 @@ object SmsRepository {
             val threadId = mms.threadId ?: return@forEach
             val index = threads.getOrPut(threadId, ::MutableIndex)
             val participants = resolvedMmsParticipants.getOrPut(threadId) {
-                mmsParticipants(context, mms.id, mms.incoming, mms.subscriptionId)
+                chooseMmsParticipants(
+                    canonicalParticipants = canonicalParticipantsByThread[threadId].orEmpty(),
+                ) { mmsParticipants(context, mms.id, mms.incoming, mms.subscriptionId) }
             }
             if (participants.isNotEmpty()) {
                 index.participants = participants
@@ -983,6 +999,18 @@ object SmsRepository {
         incoming: Boolean,
         subscriptionId: Int?,
     ): List<String> = runCatching {
+        val threadId = context.contentResolver.query(
+            Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, id.toString()),
+            arrayOf(Telephony.Mms.THREAD_ID),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            if (cursor.moveToFirst()) cursor.getLong(0).takeIf { it > 0 } else null
+        }
+        val canonicalParticipants = threadId?.let { canonicalThreadParticipants(context)[it] }.orEmpty()
+        if (canonicalParticipants.isNotEmpty()) return@runCatching canonicalParticipants
+
         val ownNumbers = if (
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) ==
             PackageManager.PERMISSION_GRANTED &&
@@ -996,7 +1024,8 @@ object SmsRepository {
         } else {
             emptyList()
         }
-        val values = mutableListOf<String>()
+        val fromValues = mutableListOf<String>()
+        val toValues = mutableListOf<String>()
         context.contentResolver.query(
             Uri.parse("content://mms/$id/addr"),
             arrayOf("address", "type"),
@@ -1011,12 +1040,63 @@ object SmsRepository {
                 if (type != 151 && (!incoming || type != 137)) continue
                 val value = cursor.getString(addressIndex).orEmpty().trim()
                 if (value.isBlank() || value == "insert-address-token") continue
-                if (incoming && ownNumbers.any { PhoneNumberUtils.compare(it, value) }) continue
-                if (values.none { PhoneNumberUtils.compare(it, value) }) values += value
+                val destination = if (incoming && type == 137) fromValues else toValues
+                if (destination.none { PhoneNumberUtils.compare(it, value) }) destination += value
             }
+        }
+        val omitSoleIncomingRecipient = shouldOmitSoleIncomingMmsRecipient(
+            incoming = incoming,
+            ownNumbersKnown = ownNumbers.isNotEmpty(),
+            toAddressCount = toValues.size,
+        )
+        val values = mutableListOf<String>()
+        (fromValues + toValues.filterNot { value ->
+            incoming && (
+                omitSoleIncomingRecipient ||
+                    ownNumbers.any { PhoneNumberUtils.compare(it, value) }
+                )
+        }).forEach { value ->
+            if (values.none { PhoneNumberUtils.compare(it, value) }) values += value
         }
         values
     }.getOrDefault(emptyList())
+
+    private fun canonicalThreadParticipants(context: Context): Map<Long, List<String>> = runCatching {
+        val addresses = mutableMapOf<Long, String>()
+        context.contentResolver.query(
+            CANONICAL_ADDRESSES_URI,
+            arrayOf("_id", "address"),
+            null,
+            null,
+            null,
+        )?.use { cursor ->
+            val idIndex = cursor.getColumnIndexOrThrow("_id")
+            val addressIndex = cursor.getColumnIndexOrThrow("address")
+            while (cursor.moveToNext()) {
+                val address = cursor.getString(addressIndex).orEmpty().trim()
+                if (address.isNotBlank()) addresses[cursor.getLong(idIndex)] = address
+            }
+        }
+        buildMap {
+            context.contentResolver.query(
+                Telephony.Threads.CONTENT_URI,
+                arrayOf(Telephony.Threads._ID, THREAD_RECIPIENT_IDS),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                val idIndex = cursor.getColumnIndexOrThrow(Telephony.Threads._ID)
+                val recipientsIndex = cursor.getColumnIndexOrThrow(THREAD_RECIPIENT_IDS)
+                while (cursor.moveToNext()) {
+                    val participants = cursor.getString(recipientsIndex).orEmpty()
+                        .split(Regex("\\s+"))
+                        .mapNotNull { it.toLongOrNull()?.let(addresses::get) }
+                        .filter(String::isNotBlank)
+                    if (participants.isNotEmpty()) put(cursor.getLong(idIndex), participants)
+                }
+            }
+        }
+    }.getOrDefault(emptyMap())
 
     private fun mmsParts(context: Context, id: Long): Pair<String, CarrierMmsAttachment?> {
         var text = ""

@@ -201,6 +201,11 @@ private fun saveAppTheme(context: android.content.Context, theme: AppTheme) {
         .apply()
 }
 
+internal fun shouldRelockVessels(
+    biometricGateEnabled: Boolean,
+    trustedActivityResultPending: Boolean,
+): Boolean = biometricGateEnabled && !trustedActivityResultPending
+
 enum class Transport(val label: String) {
     SECURE("SECURE PING"),
     SMS("CELL // SMS + MMS"),
@@ -558,6 +563,7 @@ private fun EutherPingApp(
     var vesselsUnlocked by remember { mutableStateOf(false) }
     var showVesselGate by remember { mutableStateOf(false) }
     var pendingSecureConversation by remember { mutableStateOf<Conversation?>(null) }
+    val trustedActivityResultPending = remember { mutableStateOf(false) }
     var biometricAttempt by remember { mutableIntStateOf(0) }
     var biometricError by remember { mutableStateOf<String?>(null) }
     var setupRevision by remember { mutableIntStateOf(0) }
@@ -565,8 +571,14 @@ private fun EutherPingApp(
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, biometricGateEnabled) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) setupRevision++
-            if (event == Lifecycle.Event.ON_STOP && biometricGateEnabled) {
+            if (event == Lifecycle.Event.ON_RESUME) {
+                setupRevision++
+                trustedActivityResultPending.value = false
+            }
+            if (
+                event == Lifecycle.Event.ON_STOP &&
+                shouldRelockVessels(biometricGateEnabled, trustedActivityResultPending.value)
+            ) {
                 vesselsUnlocked = false
                 showVesselGate = false
                 pendingSecureConversation = null
@@ -757,6 +769,9 @@ private fun EutherPingApp(
                                 conversation = conversation,
                                 smsRevision = smsRevision,
                                 onBack = ::closeConversation,
+                                onTrustedActivityResultPendingChange = { pending ->
+                                    trustedActivityResultPending.value = pending
+                                },
                             )
                         }
                         if (showVesselGate) {
@@ -1786,7 +1801,12 @@ private fun ConversationRow(
 }
 
 @Composable
-private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBack: () -> Unit) {
+private fun ConversationDeck(
+    conversation: Conversation,
+    smsRevision: Int,
+    onBack: () -> Unit,
+    onTrustedActivityResultPendingChange: (Boolean) -> Unit,
+) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
@@ -1825,6 +1845,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
         }
     }
     val imageSavePicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/*")) { uri ->
+        onTrustedActivityResultPendingChange(false)
         val target = pendingImageSave
         pendingImageSave = null
         if (uri != null && target != null) {
@@ -2070,6 +2091,7 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
     }
     val focusManager = LocalFocusManager.current
     val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        onTrustedActivityResultPendingChange(false)
         if (uri != null && isRealSms && (!secureLane || securePeer?.canEncrypt == true)) {
             if (!secureLane) {
                 pendingCarrierMmsUri?.let { previous ->
@@ -2300,7 +2322,17 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
                     pendingCarrierMmsUri = null
                 },
                 onAttachment = {
-                    attachmentPicker.launch(arrayOf(if (secureLane) "*/*" else "image/*"))
+                    onTrustedActivityResultPendingChange(true)
+                    runCatching {
+                        attachmentPicker.launch(arrayOf(if (secureLane) "*/*" else "image/*"))
+                    }.onFailure { error ->
+                        onTrustedActivityResultPendingChange(false)
+                        Toast.makeText(
+                            context,
+                            "Could not open attachment picker: ${error.message}",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
                 },
                 onSend = ::sendMessage,
             )
@@ -2576,7 +2608,18 @@ private fun ConversationDeck(conversation: Conversation, smsRevision: Int, onBac
             onSave = {
                 pendingImageSave = target
                 selectedImageAction = null
-                imageSavePicker.launch(safeImageName(target.suggestedName))
+                onTrustedActivityResultPendingChange(true)
+                runCatching {
+                    imageSavePicker.launch(safeImageName(target.suggestedName))
+                }.onFailure { error ->
+                    onTrustedActivityResultPendingChange(false)
+                    pendingImageSave = null
+                    Toast.makeText(
+                        context,
+                        "Could not open image saver: ${error.message}",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
             },
         )
     }
