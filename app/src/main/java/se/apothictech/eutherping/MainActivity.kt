@@ -60,6 +60,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
@@ -3173,7 +3174,9 @@ private fun LinkifiedMessageText(text: String) {
             append(text.substring(cursor))
         }
     }
-    Text(annotated, color = Mist, fontSize = 15.sp, lineHeight = 20.sp)
+    SelectionContainer {
+        Text(annotated, color = Mist, fontSize = 15.sp, lineHeight = 20.sp)
+    }
 }
 
 @Composable
