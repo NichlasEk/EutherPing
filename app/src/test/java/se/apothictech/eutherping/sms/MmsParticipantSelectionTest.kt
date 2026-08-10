@@ -7,12 +7,16 @@ import org.junit.Test
 
 class MmsParticipantSelectionTest {
     @Test
-    fun `canonical thread recipients take precedence over raw MMS addresses`() {
+    fun `GrapheneOS canonical thread drops inferred own address with equivalent formatting`() {
         assertEquals(
-            listOf("sender"),
-            chooseMmsParticipants(
-                canonicalParticipants = listOf("sender"),
-            ) { listOf("sender", "own-number") },
+            listOf("sender-address"),
+            filterKnownOwnMmsParticipants(
+                canonicalParticipants = listOf("sender-address", "DEVICE-ADDRESS"),
+                ownNumberCandidates = listOf("device address"),
+            ) { left, right ->
+                left.filter(Char::isLetterOrDigit).lowercase() ==
+                    right.filter(Char::isLetterOrDigit).lowercase()
+            },
         )
     }
 
@@ -21,7 +25,6 @@ class MmsParticipantSelectionTest {
         assertTrue(
             shouldOmitSoleIncomingMmsRecipient(
                 incoming = true,
-                ownNumbersKnown = false,
                 toAddressCount = 1,
             ),
         )
@@ -32,18 +35,16 @@ class MmsParticipantSelectionTest {
         assertFalse(
             shouldOmitSoleIncomingMmsRecipient(
                 incoming = true,
-                ownNumbersKnown = false,
                 toAddressCount = 2,
             ),
         )
     }
 
     @Test
-    fun `known own number uses number matching instead of the sole recipient fallback`() {
-        assertFalse(
+    fun `sole incoming to address is self even when SIM exposes an own number`() {
+        assertTrue(
             shouldOmitSoleIncomingMmsRecipient(
                 incoming = true,
-                ownNumbersKnown = true,
                 toAddressCount = 1,
             ),
         )

@@ -109,16 +109,18 @@ data class SmsSearchHit(
     val incoming: Boolean,
 )
 
-internal inline fun chooseMmsParticipants(
+internal inline fun filterKnownOwnMmsParticipants(
     canonicalParticipants: List<String>,
-    addressParticipants: () -> List<String>,
-): List<String> = canonicalParticipants.ifEmpty(addressParticipants)
+    ownNumberCandidates: List<String>,
+    sameAddress: (String, String) -> Boolean,
+): List<String> = canonicalParticipants.filterNot { participant ->
+    ownNumberCandidates.any { ownNumber -> sameAddress(participant, ownNumber) }
+}
 
 internal fun shouldOmitSoleIncomingMmsRecipient(
     incoming: Boolean,
-    ownNumbersKnown: Boolean,
     toAddressCount: Int,
-): Boolean = incoming && !ownNumbersKnown && toAddressCount == 1
+): Boolean = incoming && toAddressCount == 1
 
 data class CarrierMmsAttachment(
     val uri: Uri,
@@ -343,9 +345,13 @@ object SmsRepository {
             val threadId = mms.threadId ?: return@forEach
             val index = threads.getOrPut(threadId, ::MutableIndex)
             val participants = resolvedMmsParticipants.getOrPut(threadId) {
-                chooseMmsParticipants(
-                    canonicalParticipants = canonicalParticipantsByThread[threadId].orEmpty(),
-                ) { mmsParticipants(context, mms.id, mms.incoming, mms.subscriptionId) }
+                mmsParticipants(
+                    context = context,
+                    id = mms.id,
+                    incoming = mms.incoming,
+                    subscriptionId = mms.subscriptionId,
+                    canonicalParticipantsHint = canonicalParticipantsByThread[threadId].orEmpty(),
+                )
             }
             if (participants.isNotEmpty()) {
                 index.participants = participants
@@ -998,18 +1004,20 @@ object SmsRepository {
         id: Long,
         incoming: Boolean,
         subscriptionId: Int?,
+        canonicalParticipantsHint: List<String>? = null,
     ): List<String> = runCatching {
-        val threadId = context.contentResolver.query(
-            Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, id.toString()),
-            arrayOf(Telephony.Mms.THREAD_ID),
-            null,
-            null,
-            null,
-        )?.use { cursor ->
-            if (cursor.moveToFirst()) cursor.getLong(0).takeIf { it > 0 } else null
+        val canonicalParticipants = canonicalParticipantsHint ?: run {
+            val threadId = context.contentResolver.query(
+                Uri.withAppendedPath(Telephony.Mms.CONTENT_URI, id.toString()),
+                arrayOf(Telephony.Mms.THREAD_ID),
+                null,
+                null,
+                null,
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) cursor.getLong(0).takeIf { it > 0 } else null
+            }
+            threadId?.let { canonicalThreadParticipants(context)[it] }.orEmpty()
         }
-        val canonicalParticipants = threadId?.let { canonicalThreadParticipants(context)[it] }.orEmpty()
-        if (canonicalParticipants.isNotEmpty()) return@runCatching canonicalParticipants
 
         val ownNumbers = if (
             ContextCompat.checkSelfPermission(context, Manifest.permission.READ_PHONE_STATE) ==
@@ -1046,9 +1054,19 @@ object SmsRepository {
         }
         val omitSoleIncomingRecipient = shouldOmitSoleIncomingMmsRecipient(
             incoming = incoming,
-            ownNumbersKnown = ownNumbers.isNotEmpty(),
             toAddressCount = toValues.size,
         )
+        val inferredOwnNumbers = buildList {
+            addAll(ownNumbers)
+            if (omitSoleIncomingRecipient) addAll(toValues)
+        }
+        val filteredCanonicalParticipants = filterKnownOwnMmsParticipants(
+            canonicalParticipants = canonicalParticipants,
+            ownNumberCandidates = inferredOwnNumbers,
+            sameAddress = PhoneNumberUtils::compare,
+        )
+        if (filteredCanonicalParticipants.isNotEmpty()) return@runCatching filteredCanonicalParticipants
+
         val values = mutableListOf<String>()
         (fromValues + toValues.filterNot { value ->
             incoming && (
