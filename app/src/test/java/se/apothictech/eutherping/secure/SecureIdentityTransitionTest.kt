@@ -2,6 +2,7 @@ package se.apothictech.eutherping.secure
 
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class SecureIdentityTransitionTest {
@@ -81,10 +82,44 @@ class SecureIdentityTransitionTest {
         assertEquals("new", resolved.fingerprint)
     }
 
+    @Test
+    fun verifiedResetPromotesOnlyThePendingEp3Invite() {
+        val publication = byteArrayOf(5, 6, 7)
+        val pending = peer(SecurePeerState.IDENTITY_CHANGE_PENDING, oldEncryption, oldSigning, "old").copy(
+            pendingEncryptionPublicKey = newEncryption,
+            pendingSigningPublicKey = newSigning,
+            pendingFingerprint = "new",
+            pendingRequiresAcceptance = true,
+            protocol = SecureProtocol.RATCHET_EP3,
+            pendingRatchetPublication = publication,
+        )
+
+        val replacement = SecureRepository.resolvePendingEp3IdentityForVerifiedReset(pending)
+
+        assertEquals(SecurePeerState.INVITE_RECEIVED, replacement.state)
+        assertEquals(SecureProtocol.RATCHET_EP3, replacement.protocol)
+        assertArrayEquals(newEncryption, replacement.encryptionPublicKey)
+        assertArrayEquals(newSigning, replacement.signingPublicKey)
+        assertEquals("new", replacement.fingerprint)
+        assertArrayEquals(publication, replacement.ratchetPublication)
+        assertEquals(null, replacement.pendingFingerprint)
+    }
+
+    @Test
+    fun verifiedResetRejectsAStateWithoutAPendingEp3Invite() {
+        val verified = peer(SecurePeerState.VERIFIED, oldEncryption, oldSigning, "old")
+
+        assertTrue(
+            runCatching {
+                SecureRepository.resolvePendingEp3IdentityForVerifiedReset(verified)
+            }.isFailure,
+        )
+    }
+
     private fun peer(
         state: SecurePeerState,
         encryption: ByteArray? = null,
         signing: ByteArray? = null,
         fingerprint: String? = null,
-    ) = SecurePeer("+46700000000", encryption, signing, fingerprint, state)
+    ) = SecurePeer("contact-address", encryption, signing, fingerprint, state)
 }

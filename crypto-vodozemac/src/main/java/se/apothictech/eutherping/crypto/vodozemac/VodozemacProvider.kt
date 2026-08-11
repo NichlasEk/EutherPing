@@ -2,7 +2,7 @@
 
 package se.apothictech.eutherping.crypto.vodozemac
 
-import android.util.Base64
+import java.util.Base64
 import se.apothictech.eutherping.crypto.ProtocolAddress
 import se.apothictech.eutherping.crypto.ProtocolCiphertext
 import se.apothictech.eutherping.crypto.ProtocolCiphertextKind
@@ -39,6 +39,23 @@ class VodozemacProvider : SecureProtocolProvider {
     companion object {
         const val PROVIDER_ID = "vodozemac"
         const val VODOZEMAC_VERSION = "0.10.0"
+
+        fun deletePeerStateForVerifiedReset(
+            repository: ProtocolStateRepository,
+            remoteAddress: ProtocolAddress,
+        ) {
+            val storageId = peerStorageId(remoteAddress)
+            repository.transaction("vodozemac:verified-reset:$storageId") { state ->
+                state.delete("session/$storageId")
+                state.delete("identity/$storageId")
+            }
+        }
+
+        internal fun peerStorageId(remoteAddress: ProtocolAddress): String {
+            require(remoteAddress.stableId.isNotBlank()) { "A ratchet peer address is required" }
+            return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(remoteAddress.stableId.encodeToByteArray())
+        }
 
         fun acceptanceMatchesPublication(
             ciphertext: ProtocolCiphertext,
@@ -142,7 +159,7 @@ private class VodozemacEngine(
         repository.transaction("vodozemac:${localAddress.stableId}", block)
 
     private fun sessionKey(remoteAddress: ProtocolAddress): String =
-        "session/${remoteAddress.storageId()}"
+        "session/${VodozemacProvider.peerStorageId(remoteAddress)}"
 
     private fun ProtocolStateTransaction.ensureAccount(): ByteArray =
         read(ACCOUNT_KEY) ?: VodozemacNative.createAccount().also { write(ACCOUNT_KEY, it) }
@@ -151,18 +168,13 @@ private class VodozemacEngine(
         remoteAddress: ProtocolAddress,
         signingKey: ByteArray,
     ) {
-        val key = "identity/${remoteAddress.storageId()}"
+        val key = "identity/${VodozemacProvider.peerStorageId(remoteAddress)}"
         val existing = read(key)
         require(existing == null || existing.contentEquals(signingKey)) {
             "Remote identity changed for ${remoteAddress.stableId}"
         }
         if (existing == null) write(key, signingKey)
     }
-
-    private fun ProtocolAddress.storageId(): String = Base64.encodeToString(
-        stableId.encodeToByteArray(),
-        Base64.NO_PADDING or Base64.NO_WRAP or Base64.URL_SAFE,
-    )
 
     companion object {
         private const val ACCOUNT_KEY = "account"

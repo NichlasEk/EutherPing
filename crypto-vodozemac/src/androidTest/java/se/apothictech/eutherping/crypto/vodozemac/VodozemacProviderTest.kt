@@ -22,6 +22,31 @@ import se.apothictech.eutherping.crypto.storage.SecureSessionStateRepository
 @RunWith(AndroidJUnit4::class)
 class VodozemacProviderTest {
     @Test
+    fun verifiedResetDeletesOnlyTheSelectedPeerState() {
+        val state = CopyOnWriteMemoryRepository()
+        val selected = ProtocolAddress("selected-peer")
+        val retained = ProtocolAddress("retained-peer")
+        val selectedStorageId = VodozemacProvider.peerStorageId(selected)
+        val retainedStorageId = VodozemacProvider.peerStorageId(retained)
+        state.transaction("fixture") { records ->
+            records.write("account", byteArrayOf(1))
+            records.write("session/$selectedStorageId", byteArrayOf(2))
+            records.write("identity/$selectedStorageId", byteArrayOf(3))
+            records.write("session/$retainedStorageId", byteArrayOf(4))
+            records.write("identity/$retainedStorageId", byteArrayOf(5))
+        }
+
+        VodozemacProvider.deletePeerStateForVerifiedReset(state, selected)
+
+        val snapshot = state.snapshot()
+        assertTrue("account" in snapshot)
+        assertFalse("session/$selectedStorageId" in snapshot)
+        assertFalse("identity/$selectedStorageId" in snapshot)
+        assertTrue("session/$retainedStorageId" in snapshot)
+        assertTrue("identity/$retainedStorageId" in snapshot)
+    }
+
+    @Test
     fun realKeystoreRepositoriesPersistTwoIdentitiesAcrossReload() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val suffix = UUID.randomUUID().toString()

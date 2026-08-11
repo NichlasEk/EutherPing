@@ -135,4 +135,11 @@ object SecureRatchetRuntime {
         SecureSessionStateRepository(context.applicationContext, NAMESPACE)
             .deleteAllStateForVerifiedReset()
     }
+
+    fun deletePeerStateForVerifiedReset(context: Context, remoteAddress: String) = synchronized(lock) {
+        VodozemacProvider.deletePeerStateForVerifiedReset(
+            SecureSessionStateRepository(context.applicationContext, NAMESPACE),
+            ProtocolAddress(protocolAddress(remoteAddress)),
+        )
+    }
 }

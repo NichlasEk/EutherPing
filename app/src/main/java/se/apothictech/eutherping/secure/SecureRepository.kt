@@ -319,6 +319,40 @@ object SecureRepository {
         response
     }
 
+    fun resetPendingEp3IdentityForRePairing(context: Context, address: String): Result<Unit> = runCatching {
+        val replacement = resolvePendingEp3IdentityForVerifiedReset(peer(context, address))
+        SecureRatchetRuntime.deletePeerStateForVerifiedReset(context, replacement.address)
+        savePeer(context, replacement)
+    }
+
+    internal fun resolvePendingEp3IdentityForVerifiedReset(current: SecurePeer): SecurePeer {
+        check(current.state == SecurePeerState.IDENTITY_CHANGE_PENDING) {
+            "No Secure identity change is waiting"
+        }
+        check(current.pendingRequiresAcceptance) { "The pending identity is not a new invitation" }
+        val encryption = checkNotNull(current.pendingEncryptionPublicKey) {
+            "The pending identity has no encryption key"
+        }
+        val signing = checkNotNull(current.pendingSigningPublicKey) {
+            "The pending identity has no signing key"
+        }
+        val fingerprint = checkNotNull(current.pendingFingerprint) {
+            "The pending identity has no fingerprint"
+        }
+        val publication = checkNotNull(current.pendingRatchetPublication) {
+            "The pending identity has no EP3 publication"
+        }
+        return SecurePeer(
+            address = current.address,
+            encryptionPublicKey = encryption,
+            signingPublicKey = signing,
+            fingerprint = fingerprint,
+            state = SecurePeerState.INVITE_RECEIVED,
+            protocol = SecureProtocol.RATCHET_EP3,
+            ratchetPublication = publication,
+        )
+    }
+
     fun rejectIdentityChange(context: Context, address: String) {
         val current = peer(context, address)
         if (current.state == SecurePeerState.IDENTITY_CHANGE_PENDING && current.hasKeys) {

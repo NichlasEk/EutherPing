@@ -1819,6 +1819,7 @@ private fun ConversationDeck(
     var forwardingMessage by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var deleteMessageCandidate by remember(conversation.id) { mutableStateOf<DemoMessage?>(null) }
     var showDeleteConversation by remember(conversation.id) { mutableStateOf(false) }
+    var showSecureResetConfirmation by remember(conversation.id) { mutableStateOf(false) }
     var conversationSearchVisible by rememberSaveable(conversation.id) { mutableStateOf(false) }
     var conversationSearchQuery by rememberSaveable(conversation.id) { mutableStateOf("") }
     var messageLimit by remember(conversation.id) { mutableIntStateOf(INITIAL_CONVERSATION_MESSAGES) }
@@ -2406,32 +2407,36 @@ private fun ConversationDeck(
                                 secureRevision++
                             },
                             onAcceptIdentityChange = {
-                                SecureRepository.acceptIdentityChange(
-                                    context,
-                                    conversation.smsAddress.orEmpty(),
-                                ).flatMap { response ->
-                                    if (response == null) {
-                                        Result.success(Unit)
-                                    } else {
-                                        SmsRepository.sendText(
+                                if (securePeer?.pendingRatchetPublication != null) {
+                                    showSecureResetConfirmation = true
+                                } else {
+                                    SecureRepository.acceptIdentityChange(
+                                        context,
+                                        conversation.smsAddress.orEmpty(),
+                                    ).flatMap { response ->
+                                        if (response == null) {
+                                            Result.success(Unit)
+                                        } else {
+                                            SmsRepository.sendText(
+                                                context,
+                                                conversation.smsAddress.orEmpty(),
+                                                response,
+                                            )
+                                        }
+                                    }.onSuccess {
+                                        secureRevision++
+                                        Toast.makeText(
                                             context,
-                                            conversation.smsAddress.orEmpty(),
-                                            response,
-                                        )
+                                            "New identity ready for safety-code verification",
+                                            Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }.onFailure {
+                                        Toast.makeText(
+                                            context,
+                                            "Identity review failed: ${it.message}",
+                                            Toast.LENGTH_LONG,
+                                        ).show()
                                     }
-                                }.onSuccess {
-                                    secureRevision++
-                                    Toast.makeText(
-                                        context,
-                                        "New identity ready for safety-code verification",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                }.onFailure {
-                                    Toast.makeText(
-                                        context,
-                                        "Identity review failed: ${it.message}",
-                                        Toast.LENGTH_LONG,
-                                    ).show()
                                 }
                             },
                             onRejectIdentityChange = {
@@ -2706,6 +2711,54 @@ private fun ConversationDeck(
             },
             dismissButton = {
                 TextButton(onClick = { showDeleteConversation = false }) { Text("Cancel") }
+            },
+        )
+    }
+    if (showSecureResetConfirmation) {
+        AlertDialog(
+            onDismissRequest = { showSecureResetConfirmation = false },
+            title = { Text("Reset Secure pairing?") },
+            text = {
+                Text(
+                    "The other phone has a new Secure identity. This removes the old EP3 ratchet only for this contact, sends a new acceptance, and requires both phones to compare the new safety code. Continue only if the other person intentionally reset or reinstalled EutherPing.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        showSecureResetConfirmation = false
+                        coroutineScope.launch {
+                            val address = conversation.smsAddress.orEmpty()
+                            val result = withContext(Dispatchers.IO) {
+                                SecureRepository.resetPendingEp3IdentityForRePairing(context, address)
+                                    .flatMap { SecureRepository.acceptInvitation(context, address) }
+                                    .flatMap { acceptance ->
+                                        SmsRepository.sendText(context, address, acceptance)
+                                    }
+                            }
+                            result.onSuccess {
+                                secureRevision++
+                                Toast.makeText(
+                                    context,
+                                    "New Secure pairing accepted — compare safety codes",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }.onFailure {
+                                secureRevision++
+                                Toast.makeText(
+                                    context,
+                                    "Secure reset failed: ${it.message}",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        }
+                    },
+                ) { Text("Reset & re-pair") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSecureResetConfirmation = false }) {
+                    Text("Cancel")
+                }
             },
         )
     }
@@ -3542,7 +3595,16 @@ private fun SecurePairingCard(
                     Button(
                         onClick = onAcceptIdentityChange,
                         colors = ButtonDefaults.buttonColors(containerColor = Amber, contentColor = Void),
-                    ) { Text("REVIEW NEW ID", fontWeight = FontWeight.Black) }
+                    ) {
+                        Text(
+                            if (protocol == SecureProtocol.RATCHET_EP3) {
+                                "RESET & RE-PAIR"
+                            } else {
+                                "REVIEW NEW ID"
+                            },
+                            fontWeight = FontWeight.Black,
+                        )
+                    }
                     TextButton(onClick = onRejectIdentityChange) {
                         Text("KEEP OLD ID", color = Mist)
                     }
