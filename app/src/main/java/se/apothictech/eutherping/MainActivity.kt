@@ -2137,6 +2137,7 @@ private fun ConversationDeck(
                     attachmentBusy = false
                 }
                 result.onSuccess { successMessage ->
+                    AppSounds.play(context, AppSound.SECURE_SEALED)
                     attachmentRevision++
                     Toast.makeText(
                         context,
@@ -2144,6 +2145,7 @@ private fun ConversationDeck(
                         Toast.LENGTH_LONG,
                     ).show()
                 }.onFailure {
+                    AppSounds.play(context, AppSound.TERMINAL_ERROR)
                     Log.e("EutherPingAttachment", "Attachment send failed", it)
                     Toast.makeText(
                         context,
@@ -2190,6 +2192,7 @@ private fun ConversationDeck(
                     attachmentBusy = false
                 }
                 result.onSuccess { messageUri ->
+                    AppSounds.play(context, AppSound.SIGNAL_SENT)
                     resolvedThreadId = SmsRepository.threadIdForMessage(context, messageUri) ?: resolvedThreadId
                     clearStoredDraft()
                     draft = ""
@@ -2204,6 +2207,7 @@ private fun ConversationDeck(
                     focusManager.clearFocus()
                     Toast.makeText(context, "Carrier MMS queued", Toast.LENGTH_LONG).show()
                 }.onFailure {
+                    AppSounds.play(context, AppSound.TERMINAL_ERROR)
                     Log.e("EutherPingAttachment", "Carrier MMS send failed", it)
                     Toast.makeText(
                         context,
@@ -2239,6 +2243,10 @@ private fun ConversationDeck(
                     }
                 }
                     .onSuccess { messageUri ->
+                        AppSounds.play(
+                            context,
+                            if (secureLane) AppSound.SECURE_SEALED else AppSound.SIGNAL_SENT,
+                        )
                         resolvedThreadId = SmsRepository.threadIdForMessage(context, messageUri) ?: resolvedThreadId
                         clearStoredDraft()
                         draft = ""
@@ -2258,6 +2266,7 @@ private fun ConversationDeck(
                         ).show()
                     }
                     .onFailure {
+                        AppSounds.play(context, AppSound.TERMINAL_ERROR)
                         Log.e("EutherPingSms", "Message send failed", it)
                         Toast.makeText(context, "Send failed: ${it.message}", Toast.LENGTH_LONG).show()
                     }
@@ -2368,10 +2377,12 @@ private fun ConversationDeck(
                                     conversation.smsAddress.orEmpty(),
                                 ).flatMap { SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), it) }
                                     .onSuccess {
+                                        AppSounds.play(context, AppSound.SECURE_SEALED)
                                         secureRevision++
                                         Toast.makeText(context, "Secure invitation sent", Toast.LENGTH_SHORT).show()
                                     }
                                     .onFailure {
+                                        AppSounds.play(context, AppSound.TERMINAL_ERROR)
                                         Toast.makeText(context, "Invite failed: ${it.message}", Toast.LENGTH_LONG).show()
                                     }
                             },
@@ -2381,10 +2392,12 @@ private fun ConversationDeck(
                                     conversation.smsAddress.orEmpty(),
                                 ).flatMap { SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), it) }
                                     .onSuccess {
+                                        AppSounds.play(context, AppSound.SECURE_SEALED)
                                         secureRevision++
                                         Toast.makeText(context, "EP3 upgrade invitation sent", Toast.LENGTH_SHORT).show()
                                     }
                                     .onFailure {
+                                        AppSounds.play(context, AppSound.TERMINAL_ERROR)
                                         Toast.makeText(context, "EP3 upgrade failed: ${it.message}", Toast.LENGTH_LONG).show()
                                     }
                             },
@@ -2394,20 +2407,24 @@ private fun ConversationDeck(
                                     conversation.smsAddress.orEmpty(),
                                 ).flatMap { SmsRepository.sendText(context, conversation.smsAddress.orEmpty(), it) }
                                     .onSuccess {
+                                        AppSounds.play(context, AppSound.SECURE_VERIFIED)
                                         composerTransport = Transport.SECURE
                                         secureRevision++
                                         Toast.makeText(context, "Secure channel accepted", Toast.LENGTH_SHORT).show()
                                     }
                                     .onFailure {
+                                        AppSounds.play(context, AppSound.TERMINAL_ERROR)
                                         Toast.makeText(context, "Accept failed: ${it.message}", Toast.LENGTH_LONG).show()
                                     }
                             },
                             onVerify = {
                                 SecureRepository.markVerified(context, conversation.smsAddress.orEmpty())
+                                AppSounds.play(context, AppSound.SECURE_VERIFIED)
                                 secureRevision++
                             },
                             onAcceptIdentityChange = {
                                 if (securePeer?.pendingRatchetPublication != null) {
+                                    AppSounds.play(context, AppSound.IDENTITY_WARNING)
                                     showSecureResetConfirmation = true
                                 } else {
                                     SecureRepository.acceptIdentityChange(
@@ -4032,6 +4049,7 @@ private fun SystemScreen(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    var propSoundsEnabled by remember { mutableStateOf(AppSounds.isEnabled(context)) }
     var notificationPrivacy by remember {
         mutableStateOf(ConversationControlsRepository.notificationPrivacy(context))
     }
@@ -4076,6 +4094,19 @@ private fun SystemScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         ThemePickerCard(appTheme = appTheme, onThemeChange = onThemeChange)
+        SystemCard(
+            "TERMINAL SOUNDS",
+            if (propSoundsEnabled) "ARMED // LOW" else "SILENT",
+            if (propSoundsEnabled) Toxic else Muted,
+            "Subtle local interface sounds for navigation, sending and Secure actions. " +
+                "Incoming-message notification sounds remain under Android's channel settings.",
+            actionLabel = if (propSoundsEnabled) "MUTE TERMINAL" else "ARM TERMINAL",
+            onAction = {
+                propSoundsEnabled = !propSoundsEnabled
+                AppSounds.setEnabled(context, propSoundsEnabled)
+                if (propSoundsEnabled) AppSounds.play(context, AppSound.SECURE_VERIFIED)
+            },
+        )
         NotificationPrivacyCard(
             privacy = notificationPrivacy,
             onPrivacyChange = { selected ->
@@ -4321,6 +4352,7 @@ private fun SystemCard(
 
 @Composable
 private fun DeckNavigation(selected: SignalTab, onSelected: (SignalTab) -> Unit) {
+    val context = LocalContext.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -4335,7 +4367,10 @@ private fun DeckNavigation(selected: SignalTab, onSelected: (SignalTab) -> Unit)
                 modifier = Modifier
                     .weight(1f)
                     .clip(RoundedCornerShape(12.dp))
-                    .clickable { onSelected(tab) }
+                    .clickable {
+                        if (tab != selected) AppSounds.play(context, AppSound.TERMINAL_TICK)
+                        onSelected(tab)
+                    }
                     .padding(vertical = 9.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
