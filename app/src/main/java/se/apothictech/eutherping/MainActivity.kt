@@ -49,6 +49,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
@@ -56,6 +57,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -91,6 +93,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -2064,6 +2067,38 @@ private fun ConversationDeck(
             message.text.contains(query, ignoreCase = true)
         }
     }
+    val messageListState = rememberLazyListState()
+    val isNearLatestMessage by remember(messageListState) {
+        derivedStateOf {
+            messageListState.firstVisibleItemIndex <= 1
+        }
+    }
+    var positionedAtLatestMessage by remember(conversation.id) { mutableStateOf(false) }
+    var observedLatestMessageId by remember(conversation.id) { mutableStateOf<Long?>(null) }
+    var awaitingSentMessage by remember(conversation.id) { mutableStateOf(false) }
+    var explicitLatestScrollRequest by remember(conversation.id) { mutableIntStateOf(0) }
+
+    LaunchedEffect(displayedMessages.lastOrNull()?.id, conversationSearchQuery) {
+        if (conversationSearchQuery.isNotBlank()) return@LaunchedEffect
+        val latest = displayedMessages.lastOrNull() ?: return@LaunchedEffect
+        val latestChanged = observedLatestMessageId != latest.id
+        val sentMessageArrived = latestChanged && awaitingSentMessage && latest.outgoing
+        if (!positionedAtLatestMessage || isNearLatestMessage || sentMessageArrived) {
+            messageListState.animateScrollToItem(0)
+            positionedAtLatestMessage = true
+        }
+        if (latestChanged) {
+            observedLatestMessageId = latest.id
+            if (sentMessageArrived) awaitingSentMessage = false
+        }
+    }
+
+    LaunchedEffect(explicitLatestScrollRequest) {
+        if (explicitLatestScrollRequest > 0 && conversationSearchQuery.isBlank() && displayedMessages.isNotEmpty()) {
+            messageListState.animateScrollToItem(0)
+            positionedAtLatestMessage = true
+        }
+    }
     var composerTransport by rememberSaveable(conversation.id) {
         mutableStateOf(conversation.transport)
     }
@@ -2138,6 +2173,8 @@ private fun ConversationDeck(
                 }
                 result.onSuccess { successMessage ->
                     AppSounds.play(context, AppSound.SECURE_SEALED)
+                    awaitingSentMessage = true
+                    explicitLatestScrollRequest++
                     attachmentRevision++
                     Toast.makeText(
                         context,
@@ -2193,6 +2230,8 @@ private fun ConversationDeck(
                 }
                 result.onSuccess { messageUri ->
                     AppSounds.play(context, AppSound.SIGNAL_SENT)
+                    awaitingSentMessage = true
+                    explicitLatestScrollRequest++
                     resolvedThreadId = SmsRepository.threadIdForMessage(context, messageUri) ?: resolvedThreadId
                     clearStoredDraft()
                     draft = ""
@@ -2247,6 +2286,8 @@ private fun ConversationDeck(
                             context,
                             if (secureLane) AppSound.SECURE_SEALED else AppSound.SIGNAL_SENT,
                         )
+                        awaitingSentMessage = true
+                        explicitLatestScrollRequest++
                         resolvedThreadId = SmsRepository.threadIdForMessage(context, messageUri) ?: resolvedThreadId
                         clearStoredDraft()
                         draft = ""
@@ -2271,6 +2312,8 @@ private fun ConversationDeck(
                         Toast.makeText(context, "Send failed: ${it.message}", Toast.LENGTH_LONG).show()
                     }
             } else {
+                awaitingSentMessage = true
+                explicitLatestScrollRequest++
                 demoMessages += DemoMessage(
                     id = (demoMessages.maxOfOrNull { it.id } ?: 0) + 1,
                     text = text,
@@ -2357,6 +2400,7 @@ private fun ConversationDeck(
                 modifier = Modifier.fillMaxSize().alpha(0.09f),
             )
             LazyColumn(
+                state = messageListState,
                 modifier = Modifier.fillMaxSize(),
                 reverseLayout = true,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(16.dp),
@@ -3669,6 +3713,7 @@ private fun Composer(
     Column(
         modifier = Modifier
             .background(Deep)
+            .imePadding()
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 9.dp),
     ) {
@@ -3745,12 +3790,24 @@ private fun Composer(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .aspectRatio(
-                            (bitmap.width.toFloat() / bitmap.height.coerceAtLeast(1))
-                                .coerceIn(0.72f, 1.8f),
-                        )
-                        .heightIn(max = 220.dp)
-                        .clip(RoundedCornerShape(14.dp)),
+                        .height(148.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .clickable {
+                            runCatching {
+                                context.startActivity(
+                                    Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(carrierMmsUri, "image/*")
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    },
+                                )
+                            }.onFailure { error ->
+                                Toast.makeText(
+                                    context,
+                                    "Could not open MMS image: ${error.message}",
+                                    Toast.LENGTH_LONG,
+                                ).show()
+                            }
+                        },
                 )
                 TextButton(
                     onClick = onRemoveCarrierMms,
