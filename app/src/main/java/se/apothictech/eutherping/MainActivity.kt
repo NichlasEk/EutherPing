@@ -67,6 +67,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.Card
@@ -202,6 +203,28 @@ private fun saveAppTheme(context: android.content.Context, theme: AppTheme) {
         .edit()
         .putString(THEME_PREFERENCE, theme.storedValue)
         .apply()
+}
+
+private fun openDialer(context: android.content.Context, phoneNumber: String) {
+    runCatching {
+        context.startActivity(
+            Intent(Intent.ACTION_DIAL, Uri.fromParts("tel", phoneNumber, null)),
+        )
+    }.onFailure { error ->
+        Toast.makeText(
+            context,
+            "Could not open phone app: ${error.message}",
+            Toast.LENGTH_LONG,
+        ).show()
+    }
+}
+
+@Composable
+private fun DialButton(phoneNumber: String, tint: Color) {
+    val context = LocalContext.current
+    IconButton(onClick = { openDialer(context, phoneNumber) }) {
+        Icon(Icons.Default.Call, contentDescription = "Call $phoneNumber", tint = tint)
+    }
 }
 
 internal fun shouldRelockVessels(
@@ -1692,6 +1715,7 @@ private fun ConversationRow(
     onAction: (ConversationControlAction) -> Unit,
 ) {
     val accent = if (conversation.transport == Transport.SECURE) Violet else Amber
+    val dialNumber = conversation.recipients.singleOrNull() ?: conversation.smsAddress
     var menuExpanded by remember { mutableStateOf(false) }
     Box(modifier = Modifier.fillMaxWidth()) {
         Card(
@@ -1773,6 +1797,9 @@ private fun ConversationRow(
                         fontSize = 9.sp,
                     )
                 }
+            }
+            dialNumber?.takeIf { conversation.recipients.size <= 1 }?.let { number ->
+                DialButton(phoneNumber = number, tint = accent)
             }
         }
         }
@@ -2956,6 +2983,7 @@ private fun ConversationHeader(
     onBack: () -> Unit,
 ) {
     val accent = if (conversation.transport == Transport.SECURE) Violet else Amber
+    val dialNumber = conversation.recipients.singleOrNull() ?: conversation.smsAddress
     val clipboard = LocalClipboardManager.current
     var menuExpanded by remember(conversation.id) { mutableStateOf(false) }
     Column(modifier = Modifier.background(Deep)) {
@@ -2992,6 +3020,9 @@ private fun ConversationHeader(
             }
             IconButton(onClick = onToggleSearch) {
                 Icon(Icons.Default.Search, contentDescription = "Search this conversation", tint = accent)
+            }
+            dialNumber?.takeIf { conversation.recipients.size <= 1 }?.let { number ->
+                DialButton(phoneNumber = number, tint = accent)
             }
             IconButton(onClick = { menuExpanded = true }) {
                 Icon(Icons.Default.MoreVert, contentDescription = "Conversation options", tint = Muted)
@@ -3402,6 +3433,10 @@ private fun MessageSearchScreen(
                                 modifier = Modifier.weight(1f),
                             )
                             Text(formatMessageTime(hit.timestamp), color = Muted, fontSize = 10.sp)
+                            DialButton(
+                                phoneNumber = hit.address,
+                                tint = accent,
+                            )
                         }
                         Text(
                             hit.text,
@@ -3538,6 +3573,7 @@ private fun ContactResultRow(contact: PhoneContact, onClick: () -> Unit) {
                     modifier = Modifier.padding(top = 3.dp),
                 )
             }
+            DialButton(phoneNumber = contact.phoneNumber, tint = Toxic)
             Text("PING ›", color = Amber, fontFamily = FontFamily.Monospace, fontSize = 10.sp)
         }
     }
@@ -3742,17 +3778,15 @@ private fun Composer(
         }
         AnimatedVisibility(visible = transport == Transport.SMS) {
             Column(modifier = Modifier.padding(bottom = 6.dp)) {
-                Text(
-                    if (groupRecipientCount > 1) {
-                        "GROUP MMS // $groupRecipientCount recipients // reply all"
-                    } else {
-                        "Carrier charges may apply. Secure messages never fall back silently."
-                    },
-                    color = Amber.copy(alpha = 0.84f),
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                    lineHeight = 17.sp,
-                )
+                if (groupRecipientCount > 1) {
+                    Text(
+                        "GROUP MMS // $groupRecipientCount recipients // reply all",
+                        color = Amber.copy(alpha = 0.84f),
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 11.sp,
+                        lineHeight = 17.sp,
+                    )
+                }
                 if (carrierSubscriptions.isNotEmpty()) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
