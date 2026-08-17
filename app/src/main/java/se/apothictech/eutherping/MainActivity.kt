@@ -2380,7 +2380,6 @@ private fun ConversationDeck(
                 draft = draft,
                 onDraftChange = { draft = it },
                 transport = composerTransport,
-                onTransportChange = { composerTransport = it },
                 secureOnly = secureLane,
                 enabled = !secureLane || securePeer?.canEncrypt == true,
                 attachmentBusy = attachmentBusy,
@@ -3716,7 +3715,6 @@ private fun Composer(
     draft: String,
     onDraftChange: (String) -> Unit,
     transport: Transport,
-    onTransportChange: (Transport) -> Unit,
     secureOnly: Boolean,
     enabled: Boolean,
     attachmentBusy: Boolean,
@@ -3753,20 +3751,6 @@ private fun Composer(
             .navigationBarsPadding()
             .padding(horizontal = 12.dp, vertical = 9.dp),
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(bottom = 7.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            (if (secureOnly) listOf(Transport.SECURE) else listOf(Transport.SMS)).forEach { option ->
-                val selected = option == transport
-                StatusChip(
-                    text = option.label,
-                    color = if (option == Transport.SECURE) Violet else Amber,
-                    selected = selected,
-                    modifier = Modifier.clickable(enabled = enabled) { onTransportChange(option) },
-                )
-            }
-        }
         AnimatedVisibility(visible = secureOnly && !enabled) {
             Text(
                 "Complete the vessel handshake and verify the safety code before sending.",
@@ -3776,7 +3760,10 @@ private fun Composer(
                 modifier = Modifier.padding(bottom = 6.dp),
             )
         }
-        AnimatedVisibility(visible = transport == Transport.SMS) {
+        AnimatedVisibility(
+            visible = transport == Transport.SMS &&
+                (groupRecipientCount > 1 || carrierSubscriptions.size > 1),
+        ) {
             Column(modifier = Modifier.padding(bottom = 6.dp)) {
                 if (groupRecipientCount > 1) {
                     Text(
@@ -3787,7 +3774,7 @@ private fun Composer(
                         lineHeight = 17.sp,
                     )
                 }
-                if (carrierSubscriptions.isNotEmpty()) {
+                if (carrierSubscriptions.size > 1) {
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(top = 6.dp)
                             .horizontalScroll(rememberScrollState()),
